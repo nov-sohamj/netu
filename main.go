@@ -5,21 +5,24 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"netu/banner"
 	"netu/cert"
+	"netu/diff"
 	"netu/inspect"
 	"netu/lookup"
 	"netu/monitor"
+	"netu/output"
 	"netu/ping"
 	"netu/probe"
 	"netu/scanner"
+	"netu/service"
 	"netu/trace"
 	"netu/whois"
-	"netu/service"
 )
 
 const defaultTimeout = 2 * time.Second
@@ -132,7 +135,9 @@ Auto-adds https:// if no scheme is provided.
 
 Options:
   --timeout duration   Request timeout (default: 10s)
+  --benchmark n        Run n requests and report latency percentiles
   --json               Output results as JSON
+  --output file        Write JSON results to a file
 
 Reports:
   - HTTP status code and response time
@@ -144,7 +149,26 @@ Examples:
   netu http google.com
   netu http http://localhost:8080
   netu http example.com --timeout 5s
-  netu http example.com --json`,
+  netu http example.com --json
+  netu http example.com --benchmark 20
+  netu http example.com --json --output result.json`,
+
+	"diff": `netu diff — compare two JSON result files
+
+Usage:
+  netu diff <file1.json> <file2.json> [options]
+
+Options:
+  --json   Output diff as JSON
+
+Compares two JSON result files (from --output) and shows what changed.
+Useful for tracking infrastructure changes over time.
+
+Examples:
+  netu scan localhost --json --output before.json
+  # ... time passes ...
+  netu scan localhost --json --output after.json
+  netu diff before.json after.json`,
 
 	"inspect": `netu inspect — full inspection of a host
 
@@ -370,6 +394,8 @@ func main() {
 		cmdTrace(os.Args[2:])
 	case "whois":
 		cmdWhois(os.Args[2:])
+	case "diff":
+		cmdDiff(os.Args[2:])
 	case "serve":
 		cmdServe(os.Args[2:])
 	default:
@@ -402,6 +428,33 @@ func hasFlag(args []string, flag string) bool {
 		}
 	}
 	return false
+}
+
+func getFlagValue(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// writeOutput writes JSON data to a file if --output is specified.
+func writeOutput(args []string, v interface{}) {
+	outFile := getFlagValue(args, "--output")
+	if outFile == "" {
+		return
+	}
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error writing output: %s\n", err)
+		return
+	}
+	if err := os.WriteFile(outFile, append(data, '\n'), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "error writing %s: %s\n", outFile, err)
+	} else {
+		fmt.Fprintf(os.Stderr, "Results written to %s\n", outFile)
+	}
 }
 
 // netu scan <host> [port|start-end] [flags]
@@ -491,6 +544,8 @@ func cmdScan(args []string) {
 				os.Exit(1)
 			}
 			useTopPorts = true
+		case "--output":
+			i++ // skip filename
 		}
 	}
 
@@ -519,6 +574,7 @@ func cmdScan(args []string) {
 
 	if jsonOut {
 		printJSON(results)
+		writeOutput(args, results)
 		return
 	}
 
@@ -527,9 +583,9 @@ func cmdScan(args []string) {
 		if r.Open {
 			svc := ""
 			if r.Service != "" {
-				svc = " (" + r.Service + ")"
+				svc = " (" + output.Cyan(r.Service) + ")"
 			}
-			fmt.Printf("  %-6d open%s\n", r.Port, svc)
+			fmt.Printf("  %-6d %s %s\n", r.Port, output.PortState(true), svc)
 			open++
 		}
 	}
@@ -537,7 +593,7 @@ func cmdScan(args []string) {
 	if open == 0 {
 		fmt.Println("  No open ports found.")
 	}
-	fmt.Printf("\n%d/%d ports open\n", open, total)
+	fmt.Printf("\n%s/%d ports open\n", output.Bold(fmt.Sprintf("%d", open)), total)
 }
 
 // netu check <host> <port> [port...] [flags]
@@ -572,6 +628,8 @@ func cmdCheck(args []string) {
 			}
 		case "--json":
 			continue
+		case "--output":
+			i++ // skip the filename
 		default:
 			p, err := strconv.Atoi(args[i])
 			if err != nil {
@@ -586,20 +644,17 @@ func cmdCheck(args []string) {
 
 	if jsonOut {
 		printJSON(results)
+		writeOutput(args, results)
 		return
 	}
 
 	fmt.Printf("Checking %d port(s) on %s ...\n\n", len(ports), host)
 	for _, r := range results {
-		state := "closed"
-		if r.Open {
-			state = "open"
-		}
 		svc := ""
 		if r.Service != "" {
-			svc = " (" + r.Service + ")"
+			svc = " (" + output.Cyan(r.Service) + ")"
 		}
-		fmt.Printf("  %-6d %s%s\n", r.Port, state, svc)
+		fmt.Printf("  %-6d %s %s\n", r.Port, output.PortState(r.Open), svc)
 	}
 }
 
@@ -637,6 +692,8 @@ func cmdWatch(args []string) {
 				fmt.Fprintf(os.Stderr, "invalid interval: %s\n", args[i])
 				os.Exit(1)
 			}
+		case "--output":
+			i++
 		}
 	}
 
@@ -660,7 +717,7 @@ func cmdWatch(args []string) {
 	}
 
 	if result.Up {
-		fmt.Printf("Port %d is UP (took %s)\n", port, result.Elapsed.Round(time.Millisecond))
+		fmt.Printf("Port %d is %s (took %s)\n", port, output.Green("UP"), result.Elapsed.Round(time.Millisecond))
 	} else {
 		fmt.Printf("Timed out after %s — port %d did not open.\n", result.Elapsed.Round(time.Millisecond), port)
 		os.Exit(1)
@@ -679,9 +736,12 @@ func cmdLookup(args []string) {
 	jsonOut := hasFlag(args, "--json")
 
 	for i := 1; i < len(args); i++ {
-		if args[i] == "--type" {
+		switch args[i] {
+		case "--type":
 			i++
 			recordType = strings.ToLower(args[i])
+		case "--output":
+			i++
 		}
 	}
 
@@ -718,10 +778,11 @@ func cmdLookup(args []string) {
 
 	if jsonOut {
 		printJSON(result)
+		writeOutput(args, result)
 		return
 	}
 
-	fmt.Printf("Lookup: %s [%s]\n\n", target, result.Type)
+	fmt.Printf("Lookup: %s [%s]\n\n", output.Bold(target), output.Cyan(result.Type))
 	for _, r := range result.Records {
 		fmt.Printf("  %s\n", r)
 	}
@@ -768,6 +829,8 @@ func cmdTop(args []string) {
 				fmt.Fprintf(os.Stderr, "invalid ports: %s\n", args[i])
 				os.Exit(1)
 			}
+		case "--output":
+			i++
 		}
 	}
 
@@ -780,6 +843,7 @@ func cmdTop(args []string) {
 
 	if jsonOut {
 		printJSON(results)
+		writeOutput(args, results)
 		return
 	}
 
@@ -789,19 +853,19 @@ func cmdTop(args []string) {
 		if r.Open {
 			svc := ""
 			if r.Service != "" {
-				svc = " (" + r.Service + ")"
+				svc = " (" + output.Cyan(r.Service) + ")"
 			}
-			fmt.Printf("  %-6d open%s\n", r.Port, svc)
+			fmt.Printf("  %-6d %s %s\n", r.Port, output.PortState(true), svc)
 			open++
 		}
 	}
 	if open == 0 {
 		fmt.Println("  No open ports found.")
 	}
-	fmt.Printf("\n%d/%d ports open\n", open, len(portList))
+	fmt.Printf("\n%s/%d ports open\n", output.Bold(fmt.Sprintf("%d", open)), len(portList))
 }
 
-// netu http <url> [--timeout duration] [--json]
+// netu http <url> [--timeout duration] [--benchmark n] [--json]
 func cmdHTTP(args []string) {
 	if len(args) < 1 {
 		printCommandHelp("http")
@@ -811,9 +875,11 @@ func cmdHTTP(args []string) {
 	url := args[0]
 	timeout := 10 * time.Second
 	jsonOut := hasFlag(args, "--json")
+	benchN := 0
 
 	for i := 1; i < len(args); i++ {
-		if args[i] == "--timeout" {
+		switch args[i] {
+		case "--timeout":
 			i++
 			var err error
 			timeout, err = time.ParseDuration(args[i])
@@ -821,7 +887,22 @@ func cmdHTTP(args []string) {
 				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
 				os.Exit(1)
 			}
+		case "--benchmark":
+			i++
+			var err error
+			benchN, err = strconv.Atoi(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid benchmark count: %s\n", args[i])
+				os.Exit(1)
+			}
+		case "--output":
+			i++
 		}
+	}
+
+	if benchN > 0 {
+		cmdHTTPBenchmark(url, timeout, benchN, jsonOut, args)
+		return
 	}
 
 	result, err := probe.HTTP(url, timeout)
@@ -832,10 +913,11 @@ func cmdHTTP(args []string) {
 
 	if jsonOut {
 		printJSON(result)
+		writeOutput(args, result)
 		return
 	}
 
-	fmt.Printf("HTTP Probe: %s\n\n", result.URL)
+	fmt.Printf("HTTP Probe: %s\n\n", output.Bold(result.URL))
 	fmt.Printf("  Status:        %s\n", result.StatusText)
 	fmt.Printf("  Response Time: %s\n", result.ResponseTime)
 	fmt.Printf("  Content Size:  %d bytes\n", result.ContentLen)
@@ -851,23 +933,83 @@ func cmdHTTP(args []string) {
 	if len(result.SecurityChecks) > 0 {
 		fmt.Printf("\n  Security Checks:\n")
 		for _, sc := range result.SecurityChecks {
-			icon := " "
-			switch sc.Status {
-			case "pass":
-				icon = "+"
-			case "warn":
-				icon = "!"
-			case "fail":
-				icon = "x"
-			}
-			fmt.Printf("    [%s] %-26s %s\n", icon, sc.Name, sc.Detail)
+			fmt.Printf("    [%s] %-26s %s\n", output.Icon(sc.Status), sc.Name, sc.Detail)
 		}
 	}
 
 	fmt.Printf("\n  Headers:\n")
 	for _, h := range result.Headers {
-		fmt.Printf("    %s: %s\n", h.Key, h.Value)
+		fmt.Printf("    %s: %s\n", output.Gray(h.Key+":"), h.Value)
 	}
+}
+
+func cmdHTTPBenchmark(url string, timeout time.Duration, n int, jsonOut bool, args []string) {
+	if !jsonOut {
+		fmt.Printf("Benchmarking %s (%d requests) ...\n\n", output.Bold(url), n)
+	}
+
+	var durations []time.Duration
+	var errors int
+
+	for i := 0; i < n; i++ {
+		output.Progress(i+1, n, "Requests")
+		start := time.Now()
+		_, err := probe.HTTP(url, timeout)
+		elapsed := time.Since(start)
+		if err != nil {
+			errors++
+			continue
+		}
+		durations = append(durations, elapsed)
+	}
+
+	if len(durations) == 0 {
+		fmt.Fprintf(os.Stderr, "all %d requests failed\n", n)
+		os.Exit(1)
+	}
+
+	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+
+	min := durations[0]
+	max := durations[len(durations)-1]
+	p50 := durations[len(durations)*50/100]
+	p95 := durations[len(durations)*95/100]
+	p99 := durations[len(durations)*99/100]
+
+	var total time.Duration
+	for _, d := range durations {
+		total += d
+	}
+	avg := total / time.Duration(len(durations))
+
+	benchResult := map[string]interface{}{
+		"url":      url,
+		"requests": n,
+		"success":  len(durations),
+		"errors":   errors,
+		"min":      min.String(),
+		"max":      max.String(),
+		"avg":      avg.String(),
+		"p50":      p50.String(),
+		"p95":      p95.String(),
+		"p99":      p99.String(),
+	}
+
+	if jsonOut {
+		printJSON(benchResult)
+		writeOutput(args, benchResult)
+		return
+	}
+
+	fmt.Printf("  Requests:  %d total, %s success, %s errors\n",
+		n, output.Green(fmt.Sprintf("%d", len(durations))), output.Red(fmt.Sprintf("%d", errors)))
+	fmt.Printf("  Latency:\n")
+	fmt.Printf("    Min:  %s\n", min)
+	fmt.Printf("    Avg:  %s\n", avg)
+	fmt.Printf("    Max:  %s\n", max)
+	fmt.Printf("    P50:  %s\n", p50)
+	fmt.Printf("    P95:  %s\n", p95)
+	fmt.Printf("    P99:  %s\n", p99)
 }
 
 // netu ping <host> <port> [--count n] [--timeout duration] [--json]
@@ -904,6 +1046,8 @@ func cmdPing(args []string) {
 				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
 				os.Exit(1)
 			}
+		case "--output":
+			i++
 		}
 	}
 
@@ -915,19 +1059,26 @@ func cmdPing(args []string) {
 
 	if jsonOut {
 		printJSON(stats)
+		writeOutput(args, stats)
 		return
 	}
 
 	for _, p := range stats.Pings {
 		if p.OK {
-			fmt.Printf("  seq=%d rtt=%s\n", p.Seq, p.RTT)
+			fmt.Printf("  seq=%d rtt=%s\n", p.Seq, output.Green(p.RTT))
 		} else {
-			fmt.Printf("  seq=%d timeout\n", p.Seq)
+			fmt.Printf("  seq=%d %s\n", p.Seq, output.Red("timeout"))
 		}
 	}
 
 	fmt.Printf("\n--- %s ping stats ---\n", stats.Host)
-	fmt.Printf("%d sent, %d received, %.1f%% loss\n", stats.Sent, stats.Received, stats.LossPercent)
+	lossColor := output.Green
+	if stats.LossPercent > 50 {
+		lossColor = output.Red
+	} else if stats.LossPercent > 0 {
+		lossColor = output.Yellow
+	}
+	fmt.Printf("%d sent, %d received, %s loss\n", stats.Sent, stats.Received, lossColor(fmt.Sprintf("%.1f%%", stats.LossPercent)))
 	if stats.Received > 0 {
 		fmt.Printf("rtt min/avg/max = %s/%s/%s\n", stats.MinRTT, stats.AvgRTT, stats.MaxRTT)
 	}
@@ -944,19 +1095,20 @@ func cmdInspect(args []string) {
 	jsonOut := hasFlag(args, "--json")
 
 	if !jsonOut {
-		fmt.Printf("Inspecting %s ...\n", host)
+		fmt.Printf("Inspecting %s ...\n", output.Bold(host))
 	}
 
 	result := inspect.Run(host)
 
 	if jsonOut {
 		printJSON(result)
+		writeOutput(args, result)
 		return
 	}
 
 	// DNS
 	if result.DNS != nil {
-		fmt.Printf("\n  DNS:\n")
+		fmt.Printf("\n  %s\n", output.Bold("DNS:"))
 		if len(result.DNS.IPs) > 0 {
 			fmt.Printf("    IPs:  %s\n", strings.Join(result.DNS.IPs, ", "))
 		}
@@ -970,22 +1122,22 @@ func cmdInspect(args []string) {
 
 	// Ports
 	if result.Ports != nil {
-		fmt.Printf("\n  Open Ports (%d/%d):\n", len(result.Ports.Open), result.Ports.Total)
+		fmt.Printf("\n  %s (%d/%d):\n", output.Bold("Open Ports"), len(result.Ports.Open), result.Ports.Total)
 		if len(result.Ports.Open) == 0 {
 			fmt.Printf("    none\n")
 		}
 		for _, p := range result.Ports.Open {
 			svc := ""
 			if p.Service != "" {
-				svc = " (" + p.Service + ")"
+				svc = " (" + output.Cyan(p.Service) + ")"
 			}
-			fmt.Printf("    %-6d open%s\n", p.Port, svc)
+			fmt.Printf("    %-6d %s %s\n", p.Port, output.PortState(true), svc)
 		}
 	}
 
 	// HTTP
 	if result.HTTP != nil {
-		fmt.Printf("\n  HTTP:\n")
+		fmt.Printf("\n  %s\n", output.Bold("HTTP:"))
 		fmt.Printf("    URL:           %s\n", result.HTTP.URL)
 		fmt.Printf("    Status:        %s\n", result.HTTP.StatusText)
 		fmt.Printf("    Response Time: %s\n", result.HTTP.ResponseTime)
@@ -993,18 +1145,9 @@ func cmdInspect(args []string) {
 			fmt.Printf("    TLS Version:   %s\n", result.HTTP.TLS.Version)
 		}
 		if len(result.HTTP.SecurityChecks) > 0 {
-			fmt.Printf("\n  Security:\n")
+			fmt.Printf("\n  %s\n", output.Bold("Security:"))
 			for _, sc := range result.HTTP.SecurityChecks {
-				icon := " "
-				switch sc.Status {
-				case "pass":
-					icon = "+"
-				case "warn":
-					icon = "!"
-				case "fail":
-					icon = "x"
-				}
-				fmt.Printf("    [%s] %-26s %s\n", icon, sc.Name, sc.Detail)
+				fmt.Printf("    [%s] %-26s %s\n", output.Icon(sc.Status), sc.Name, sc.Detail)
 			}
 		}
 	}
@@ -1012,7 +1155,7 @@ func cmdInspect(args []string) {
 	// TLS
 	if result.TLS != nil && len(result.TLS.Chain) > 0 {
 		leaf := result.TLS.Chain[0]
-		fmt.Printf("\n  TLS Certificate:\n")
+		fmt.Printf("\n  %s\n", output.Bold("TLS Certificate:"))
 		fmt.Printf("    Subject:  %s\n", leaf.Subject)
 		fmt.Printf("    Issuer:   %s\n", leaf.Issuer)
 		fmt.Printf("    Expires:  %s (%d days left)\n", leaf.NotAfter, leaf.DaysLeft)
@@ -1021,9 +1164,9 @@ func cmdInspect(args []string) {
 
 	// Errors
 	if len(result.Errors) > 0 {
-		fmt.Printf("\n  Errors:\n")
+		fmt.Printf("\n  %s\n", output.Bold("Errors:"))
 		for _, e := range result.Errors {
-			fmt.Printf("    - %s\n", e)
+			fmt.Printf("    %s %s\n", output.Red("-"), e)
 		}
 	}
 
@@ -1060,6 +1203,8 @@ func cmdCert(args []string) {
 				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
 				os.Exit(1)
 			}
+		case "--output":
+			i++
 		}
 	}
 
@@ -1071,10 +1216,11 @@ func cmdCert(args []string) {
 
 	if jsonOut {
 		printJSON(result)
+		writeOutput(args, result)
 		return
 	}
 
-	fmt.Printf("TLS Certificate: %s:%d (%s)\n", result.Host, result.Port, result.TLSVersion)
+	fmt.Printf("TLS Certificate: %s:%d (%s)\n", output.Bold(result.Host), result.Port, output.Cyan(result.TLSVersion))
 	for i, c := range result.Chain {
 		if i == 0 {
 			fmt.Printf("\n  Leaf Certificate:\n")
@@ -1133,6 +1279,8 @@ func cmdMonitor(args []string) {
 				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
 				os.Exit(1)
 			}
+		case "--output":
+			i++
 		}
 	}
 
@@ -1152,10 +1300,11 @@ func cmdMonitor(args []string) {
 		if jsonOut {
 			printJSON(e)
 		} else {
+			status := output.Status(e.Status)
 			if e.RTT != "" {
-				fmt.Printf("  [%s] %s (rtt %s)\n", e.Time, e.Status, e.RTT)
+				fmt.Printf("  [%s] %s (rtt %s)\n", output.Gray(e.Time), status, e.RTT)
 			} else {
-				fmt.Printf("  [%s] %s\n", e.Time, e.Status)
+				fmt.Printf("  [%s] %s\n", output.Gray(e.Time), status)
 			}
 		}
 	}
@@ -1185,13 +1334,16 @@ func cmdBanner(args []string) {
 	jsonOut := hasFlag(args, "--json")
 
 	for i := 2; i < len(args); i++ {
-		if args[i] == "--timeout" {
+		switch args[i] {
+		case "--timeout":
 			i++
 			timeout, err = time.ParseDuration(args[i])
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
 				os.Exit(1)
 			}
+		case "--output":
+			i++
 		}
 	}
 
@@ -1203,10 +1355,11 @@ func cmdBanner(args []string) {
 
 	if jsonOut {
 		printJSON(result)
+		writeOutput(args, result)
 		return
 	}
 
-	fmt.Printf("Banner: %s:%d [%s]\n\n", result.Host, result.Port, result.Proto)
+	fmt.Printf("Banner: %s:%d [%s]\n\n", output.Bold(result.Host), result.Port, output.Cyan(result.Proto))
 	fmt.Println(result.Banner)
 }
 
@@ -1222,7 +1375,8 @@ func cmdWhois(args []string) {
 	jsonOut := hasFlag(args, "--json")
 
 	for i := 1; i < len(args); i++ {
-		if args[i] == "--timeout" {
+		switch args[i] {
+		case "--timeout":
 			i++
 			var err error
 			timeout, err = time.ParseDuration(args[i])
@@ -1230,6 +1384,8 @@ func cmdWhois(args []string) {
 				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
 				os.Exit(1)
 			}
+		case "--output":
+			i++
 		}
 	}
 
@@ -1241,10 +1397,11 @@ func cmdWhois(args []string) {
 
 	if jsonOut {
 		printJSON(result)
+		writeOutput(args, result)
 		return
 	}
 
-	fmt.Printf("WHOIS: %s (server: %s)\n\n", result.Target, result.Server)
+	fmt.Printf("WHOIS: %s (server: %s)\n\n", output.Bold(result.Target), output.Gray(result.Server))
 	fmt.Println(result.Raw)
 }
 
@@ -1278,6 +1435,8 @@ func cmdTrace(args []string) {
 				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
 				os.Exit(1)
 			}
+		case "--output":
+			i++
 		}
 	}
 
@@ -1289,19 +1448,20 @@ func cmdTrace(args []string) {
 
 	if jsonOut {
 		printJSON(result)
+		writeOutput(args, result)
 		return
 	}
 
-	fmt.Printf("Traceroute to %s (max %d hops)\n\n", result.Target, result.MaxHops)
+	fmt.Printf("Traceroute to %s (max %d hops)\n\n", output.Bold(result.Target), result.MaxHops)
 	for _, h := range result.Hops {
 		if h.OK {
 			if h.Addr == h.Host {
-				fmt.Printf("  %2d  %-40s  %s\n", h.TTL, h.Addr, h.RTT)
+				fmt.Printf("  %2d  %-40s  %s\n", h.TTL, h.Addr, output.Green(h.RTT))
 			} else {
-				fmt.Printf("  %2d  %s (%s)  %s\n", h.TTL, h.Host, h.Addr, h.RTT)
+				fmt.Printf("  %2d  %s (%s)  %s\n", h.TTL, h.Host, output.Gray(h.Addr), output.Green(h.RTT))
 			}
 		} else {
-			fmt.Printf("  %2d  *\n", h.TTL)
+			fmt.Printf("  %2d  %s\n", h.TTL, output.Red("*"))
 		}
 	}
 }
@@ -1321,6 +1481,50 @@ func cmdServe(args []string) {
 		fmt.Fprintf(os.Stderr, "error: %s\n", err)
 		os.Exit(1)
 	}
+}
+
+// netu diff <file1.json> <file2.json> [--json]
+func cmdDiff(args []string) {
+	if len(args) < 2 {
+		printCommandHelp("diff")
+		os.Exit(1)
+	}
+
+	file1 := args[0]
+	file2 := args[1]
+	jsonOut := hasFlag(args, "--json")
+
+	result, err := diff.CompareFiles(file1, file2)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s\n", err)
+		os.Exit(1)
+	}
+
+	if jsonOut {
+		printJSON(result)
+		writeOutput(args, result)
+		return
+	}
+
+	fmt.Printf("Diff: %s vs %s\n\n", file1, file2)
+	if len(result.Changes) == 0 {
+		fmt.Println("  No differences found.")
+		return
+	}
+
+	for _, c := range result.Changes {
+		switch c.Type {
+		case "added":
+			fmt.Printf("  %s %s: %s\n", output.Green("+"), c.Key, c.New)
+		case "removed":
+			fmt.Printf("  %s %s: %s\n", output.Red("-"), c.Key, c.Old)
+		case "changed":
+			fmt.Printf("  %s %s:\n", output.Yellow("~"), c.Key)
+			fmt.Printf("      old: %s\n", c.Old)
+			fmt.Printf("      new: %s\n", c.New)
+		}
+	}
+	fmt.Printf("\n%d change(s)\n", len(result.Changes))
 }
 
 func printUsage() {
@@ -1343,12 +1547,14 @@ Commands:
   ping     TCP ping a host with latency stats
   trace    Traceroute to a host (requires sudo)
   whois    WHOIS lookup for a domain or IP
+  diff     Compare two JSON result files
   serve    Run netu as an HTTP API service
   help     Show help for a command
 
 Global flags:
-  --help, -h   Show help
-  --json       Output results as JSON (supported on all commands)
+  --help, -h     Show help
+  --json         Output results as JSON (supported on all commands)
+  --output file  Write JSON results to a file
 
 Run 'netu help <command>' for details on a specific command.`)
 }

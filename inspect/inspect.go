@@ -50,7 +50,6 @@ func Run(host string) Result {
 
 	mx, err := lookup.QueryMX(host)
 	if err == nil {
-		mx.Records = mx.Records
 		dns.MX = mx.Records
 	}
 
