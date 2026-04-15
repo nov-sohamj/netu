@@ -12,6 +12,7 @@ import (
 	"netu/ping"
 	"netu/probe"
 	"netu/scanner"
+	"netu/trace"
 	"netu/service"
 )
 
@@ -129,6 +130,24 @@ Examples:
   netu http https://example.com --timeout 5s
   netu http https://example.com --json`,
 
+	"trace": `netu trace — traceroute to a host
+
+Usage:
+  netu trace <host> [options]
+
+Options:
+  --hops n             Maximum number of hops (default: 30)
+  --timeout duration   Timeout per hop (default: 2s)
+  --json               Output results as JSON
+
+Sends UDP probes with increasing TTL to trace the network path.
+Requires root/sudo for raw socket access.
+
+Examples:
+  sudo netu trace google.com
+  sudo netu trace 8.8.8.8 --hops 20
+  sudo netu trace google.com --json`,
+
 	"ping": `netu ping — TCP ping a host with latency stats
 
 Usage:
@@ -225,6 +244,8 @@ func main() {
 		cmdHTTP(os.Args[2:])
 	case "ping":
 		cmdPing(os.Args[2:])
+	case "trace":
+		cmdTrace(os.Args[2:])
 	case "serve":
 		cmdServe(os.Args[2:])
 	default:
@@ -680,6 +701,64 @@ func cmdPing(args []string) {
 	}
 }
 
+// netu trace <host> [--hops n] [--timeout duration] [--json]
+func cmdTrace(args []string) {
+	if len(args) < 1 {
+		printCommandHelp("trace")
+		os.Exit(1)
+	}
+
+	host := args[0]
+	maxHops := 30
+	timeout := defaultTimeout
+	jsonOut := hasFlag(args, "--json")
+
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--hops":
+			i++
+			var err error
+			maxHops, err = strconv.Atoi(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid hops: %s\n", args[i])
+				os.Exit(1)
+			}
+		case "--timeout":
+			i++
+			var err error
+			timeout, err = time.ParseDuration(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
+				os.Exit(1)
+			}
+		}
+	}
+
+	result, err := trace.Trace(host, maxHops, timeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s\n", err)
+		os.Exit(1)
+	}
+
+	if jsonOut {
+		printJSON(result)
+		return
+	}
+
+	fmt.Printf("Traceroute to %s (max %d hops)\n\n", result.Target, result.MaxHops)
+	for _, h := range result.Hops {
+		if h.OK {
+			if h.Addr == h.Host {
+				fmt.Printf("  %2d  %-40s  %s\n", h.TTL, h.Addr, h.RTT)
+			} else {
+				fmt.Printf("  %2d  %s (%s)  %s\n", h.TTL, h.Host, h.Addr, h.RTT)
+			}
+		} else {
+			fmt.Printf("  %2d  *\n", h.TTL)
+		}
+	}
+}
+
 // netu serve [--addr address]
 func cmdServe(args []string) {
 	addr := "0.0.0.0:8080"
@@ -711,6 +790,7 @@ Commands:
   lookup   DNS lookup for a domain or IP
   http     Probe a URL for status, timing, headers, and TLS info
   ping     TCP ping a host with latency stats
+  trace    Traceroute to a host (requires sudo)
   serve    Run netu as an HTTP API service
   help     Show help for a command
 
