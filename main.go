@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"netu/banner"
+	"netu/cert"
 	"netu/lookup"
 	"netu/monitor"
 	"netu/ping"
@@ -133,6 +134,28 @@ Examples:
   netu http http://localhost:8080
   netu http https://example.com --timeout 5s
   netu http https://example.com --json`,
+
+	"cert": `netu cert — inspect TLS certificate on a host
+
+Usage:
+  netu cert <host> [options]
+
+Options:
+  --port n             Port to connect to (default: 443)
+  --timeout duration   Connection timeout (default: 5s)
+  --json               Output results as JSON
+
+Shows the full TLS certificate chain with:
+  - Subject and Issuer
+  - Subject Alternative Names (SANs)
+  - Validity dates and days until expiry
+  - Serial number and signature algorithm
+  - Key usage and whether the cert is a CA
+
+Examples:
+  netu cert google.com
+  netu cert localhost --port 8443
+  netu cert example.com --json`,
 
 	"monitor": `netu monitor — continuously monitor a port
 
@@ -304,6 +327,8 @@ func main() {
 		cmdHTTP(os.Args[2:])
 	case "ping":
 		cmdPing(os.Args[2:])
+	case "cert":
+		cmdCert(os.Args[2:])
 	case "monitor":
 		cmdMonitor(os.Args[2:])
 	case "banner":
@@ -767,6 +792,74 @@ func cmdPing(args []string) {
 	}
 }
 
+// netu cert <host> [--port n] [--timeout duration] [--json]
+func cmdCert(args []string) {
+	if len(args) < 1 {
+		printCommandHelp("cert")
+		os.Exit(1)
+	}
+
+	host := args[0]
+	port := 443
+	timeout := 5 * time.Second
+	jsonOut := hasFlag(args, "--json")
+
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--port":
+			i++
+			var err error
+			port, err = strconv.Atoi(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid port: %s\n", args[i])
+				os.Exit(1)
+			}
+		case "--timeout":
+			i++
+			var err error
+			timeout, err = time.ParseDuration(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
+				os.Exit(1)
+			}
+		}
+	}
+
+	result, err := cert.Inspect(host, port, timeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s\n", err)
+		os.Exit(1)
+	}
+
+	if jsonOut {
+		printJSON(result)
+		return
+	}
+
+	fmt.Printf("TLS Certificate: %s:%d\n", result.Host, result.Port)
+	for i, c := range result.Chain {
+		if i == 0 {
+			fmt.Printf("\n  Leaf Certificate:\n")
+		} else {
+			fmt.Printf("\n  Chain Certificate #%d:\n", i)
+		}
+		fmt.Printf("    Subject:    %s\n", c.Subject)
+		fmt.Printf("    Issuer:     %s\n", c.Issuer)
+		if len(c.SANs) > 0 {
+			fmt.Printf("    SANs:       %s\n", strings.Join(c.SANs, ", "))
+		}
+		fmt.Printf("    Valid:      %s to %s (%d days left)\n", c.NotBefore, c.NotAfter, c.DaysLeft)
+		fmt.Printf("    Serial:     %s\n", c.Serial)
+		fmt.Printf("    Algorithm:  %s\n", c.SigAlgo)
+		if len(c.KeyUsage) > 0 {
+			fmt.Printf("    Key Usage:  %s\n", strings.Join(c.KeyUsage, ", "))
+		}
+		if c.IsCA {
+			fmt.Printf("    CA:         yes\n")
+		}
+	}
+}
+
 // netu monitor <host> <port> [--interval duration] [--timeout duration] [--verbose] [--json]
 func cmdMonitor(args []string) {
 	if len(args) < 2 {
@@ -1005,6 +1098,7 @@ Commands:
   top      Scan the top 100 common ports on a host
   lookup   DNS lookup for a domain or IP
   http     Probe a URL for status, timing, headers, and TLS info
+  cert     Inspect TLS certificate on a host
   monitor  Continuously monitor a port (UP/DOWN)
   banner   Grab service banner from a port
   ping     TCP ping a host with latency stats
