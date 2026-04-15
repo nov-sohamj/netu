@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"netu/lookup"
+	"netu/ping"
 	"netu/probe"
 	"netu/scanner"
 	"netu/service"
@@ -128,6 +129,24 @@ Examples:
   netu http https://example.com --timeout 5s
   netu http https://example.com --json`,
 
+	"ping": `netu ping — TCP ping a host with latency stats
+
+Usage:
+  netu ping <host> <port> [options]
+
+Options:
+  --count n            Number of pings to send (default: 4)
+  --timeout duration   Connection timeout per ping (default: 2s)
+  --json               Output results as JSON
+
+Uses TCP connect (no root required). Reports per-ping RTT and
+summary stats (min/avg/max latency, packet loss).
+
+Examples:
+  netu ping localhost 22
+  netu ping google.com 443 --count 10
+  netu ping localhost 8080 --json`,
+
 	"serve": `netu serve — run netu as an HTTP API service
 
 Usage:
@@ -204,6 +223,8 @@ func main() {
 		cmdTop(os.Args[2:])
 	case "http":
 		cmdHTTP(os.Args[2:])
+	case "ping":
+		cmdPing(os.Args[2:])
 	case "serve":
 		cmdServe(os.Args[2:])
 	default:
@@ -596,6 +617,69 @@ func cmdHTTP(args []string) {
 	}
 }
 
+// netu ping <host> <port> [--count n] [--timeout duration] [--json]
+func cmdPing(args []string) {
+	if len(args) < 2 {
+		printCommandHelp("ping")
+		os.Exit(1)
+	}
+
+	host := args[0]
+	port, err := strconv.Atoi(args[1])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid port: %s\n", args[1])
+		os.Exit(1)
+	}
+
+	count := 4
+	timeout := defaultTimeout
+	jsonOut := hasFlag(args, "--json")
+
+	for i := 2; i < len(args); i++ {
+		switch args[i] {
+		case "--count":
+			i++
+			count, err = strconv.Atoi(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid count: %s\n", args[i])
+				os.Exit(1)
+			}
+		case "--timeout":
+			i++
+			timeout, err = time.ParseDuration(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
+				os.Exit(1)
+			}
+		}
+	}
+
+	if !jsonOut {
+		fmt.Printf("TCP PING %s:%d (%d pings) ...\n\n", host, port, count)
+	}
+
+	stats := ping.TCPPing(host, port, count, timeout)
+
+	if jsonOut {
+		printJSON(stats)
+		return
+	}
+
+	for _, p := range stats.Pings {
+		if p.OK {
+			fmt.Printf("  seq=%d rtt=%s\n", p.Seq, p.RTT)
+		} else {
+			fmt.Printf("  seq=%d timeout\n", p.Seq)
+		}
+	}
+
+	fmt.Printf("\n--- %s ping stats ---\n", stats.Host)
+	fmt.Printf("%d sent, %d received, %.1f%% loss\n", stats.Sent, stats.Received, stats.LossPercent)
+	if stats.Received > 0 {
+		fmt.Printf("rtt min/avg/max = %s/%s/%s\n", stats.MinRTT, stats.AvgRTT, stats.MaxRTT)
+	}
+}
+
 // netu serve [--addr address]
 func cmdServe(args []string) {
 	addr := "0.0.0.0:8080"
@@ -626,6 +710,7 @@ Commands:
   top      Scan the top 100 common ports on a host
   lookup   DNS lookup for a domain or IP
   http     Probe a URL for status, timing, headers, and TLS info
+  ping     TCP ping a host with latency stats
   serve    Run netu as an HTTP API service
   help     Show help for a command
 
