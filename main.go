@@ -11,6 +11,7 @@ import (
 
 	"netu/banner"
 	"netu/cert"
+	"netu/inspect"
 	"netu/lookup"
 	"netu/monitor"
 	"netu/ping"
@@ -144,6 +145,26 @@ Examples:
   netu http http://localhost:8080
   netu http example.com --timeout 5s
   netu http example.com --json`,
+
+	"inspect": `netu inspect — full inspection of a host
+
+Usage:
+  netu inspect <host> [options]
+
+Options:
+  --json   Output results as JSON
+
+Runs a comprehensive inspection combining:
+  - DNS lookup (A/AAAA, NS, MX records)
+  - Top 100 port scan with service detection
+  - HTTP probe with security checks
+  - TLS certificate chain inspection
+
+This is the fastest way to get a complete picture of a host.
+
+Examples:
+  netu inspect google.com
+  netu inspect example.com --json`,
 
 	"cert": `netu cert — inspect TLS certificate on a host
 
@@ -337,6 +358,8 @@ func main() {
 		cmdHTTP(os.Args[2:])
 	case "ping":
 		cmdPing(os.Args[2:])
+	case "inspect":
+		cmdInspect(os.Args[2:])
 	case "cert":
 		cmdCert(os.Args[2:])
 	case "monitor":
@@ -910,6 +933,103 @@ func cmdPing(args []string) {
 	}
 }
 
+// netu inspect <host> [--json]
+func cmdInspect(args []string) {
+	if len(args) < 1 {
+		printCommandHelp("inspect")
+		os.Exit(1)
+	}
+
+	host := args[0]
+	jsonOut := hasFlag(args, "--json")
+
+	if !jsonOut {
+		fmt.Printf("Inspecting %s ...\n", host)
+	}
+
+	result := inspect.Run(host)
+
+	if jsonOut {
+		printJSON(result)
+		return
+	}
+
+	// DNS
+	if result.DNS != nil {
+		fmt.Printf("\n  DNS:\n")
+		if len(result.DNS.IPs) > 0 {
+			fmt.Printf("    IPs:  %s\n", strings.Join(result.DNS.IPs, ", "))
+		}
+		if len(result.DNS.NS) > 0 {
+			fmt.Printf("    NS:   %s\n", strings.Join(result.DNS.NS, ", "))
+		}
+		if len(result.DNS.MX) > 0 {
+			fmt.Printf("    MX:   %s\n", strings.Join(result.DNS.MX, ", "))
+		}
+	}
+
+	// Ports
+	if result.Ports != nil {
+		fmt.Printf("\n  Open Ports (%d/%d):\n", len(result.Ports.Open), result.Ports.Total)
+		if len(result.Ports.Open) == 0 {
+			fmt.Printf("    none\n")
+		}
+		for _, p := range result.Ports.Open {
+			svc := ""
+			if p.Service != "" {
+				svc = " (" + p.Service + ")"
+			}
+			fmt.Printf("    %-6d open%s\n", p.Port, svc)
+		}
+	}
+
+	// HTTP
+	if result.HTTP != nil {
+		fmt.Printf("\n  HTTP:\n")
+		fmt.Printf("    URL:           %s\n", result.HTTP.URL)
+		fmt.Printf("    Status:        %s\n", result.HTTP.StatusText)
+		fmt.Printf("    Response Time: %s\n", result.HTTP.ResponseTime)
+		if result.HTTP.TLS != nil {
+			fmt.Printf("    TLS Version:   %s\n", result.HTTP.TLS.Version)
+		}
+		if len(result.HTTP.SecurityChecks) > 0 {
+			fmt.Printf("\n  Security:\n")
+			for _, sc := range result.HTTP.SecurityChecks {
+				icon := " "
+				switch sc.Status {
+				case "pass":
+					icon = "+"
+				case "warn":
+					icon = "!"
+				case "fail":
+					icon = "x"
+				}
+				fmt.Printf("    [%s] %-26s %s\n", icon, sc.Name, sc.Detail)
+			}
+		}
+	}
+
+	// TLS
+	if result.TLS != nil && len(result.TLS.Chain) > 0 {
+		leaf := result.TLS.Chain[0]
+		fmt.Printf("\n  TLS Certificate:\n")
+		fmt.Printf("    Subject:  %s\n", leaf.Subject)
+		fmt.Printf("    Issuer:   %s\n", leaf.Issuer)
+		fmt.Printf("    Expires:  %s (%d days left)\n", leaf.NotAfter, leaf.DaysLeft)
+		fmt.Printf("    Version:  %s\n", result.TLS.TLSVersion)
+	}
+
+	// Errors
+	if len(result.Errors) > 0 {
+		fmt.Printf("\n  Errors:\n")
+		for _, e := range result.Errors {
+			fmt.Printf("    - %s\n", e)
+		}
+	}
+
+	fmt.Println()
+}
+
 // netu cert <host> [--port n] [--timeout duration] [--json]
 func cmdCert(args []string) {
 	if len(args) < 1 {
@@ -1215,7 +1335,8 @@ Commands:
   watch    Wait for a port to come up
   top      Scan the top 100 common ports on a host
   lookup   DNS lookup for a domain or IP
-  http     Probe a URL for status, timing, headers, and TLS info
+  http     Probe a URL for status, timing, headers, TLS, and security
+  inspect  Full inspection of a host (DNS + ports + HTTP + TLS)
   cert     Inspect TLS certificate on a host
   monitor  Continuously monitor a port (UP/DOWN)
   banner   Grab service banner from a port
