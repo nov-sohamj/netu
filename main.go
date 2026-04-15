@@ -13,6 +13,7 @@ import (
 	"netu/probe"
 	"netu/scanner"
 	"netu/trace"
+	"netu/whois"
 	"netu/service"
 )
 
@@ -130,6 +131,23 @@ Examples:
   netu http https://example.com --timeout 5s
   netu http https://example.com --json`,
 
+	"whois": `netu whois — domain/IP WHOIS lookup
+
+Usage:
+  netu whois <domain|ip> [options]
+
+Options:
+  --timeout duration   Query timeout (default: 10s)
+  --json               Output results as JSON
+
+Queries the appropriate WHOIS server based on the TLD or IP range.
+Returns registration info, expiry dates, registrar, name servers, etc.
+
+Examples:
+  netu whois google.com
+  netu whois 8.8.8.8
+  netu whois example.io --json`,
+
 	"trace": `netu trace — traceroute to a host
 
 Usage:
@@ -246,6 +264,8 @@ func main() {
 		cmdPing(os.Args[2:])
 	case "trace":
 		cmdTrace(os.Args[2:])
+	case "whois":
+		cmdWhois(os.Args[2:])
 	case "serve":
 		cmdServe(os.Args[2:])
 	default:
@@ -701,6 +721,44 @@ func cmdPing(args []string) {
 	}
 }
 
+// netu whois <domain|ip> [--timeout duration] [--json]
+func cmdWhois(args []string) {
+	if len(args) < 1 {
+		printCommandHelp("whois")
+		os.Exit(1)
+	}
+
+	target := args[0]
+	timeout := 10 * time.Second
+	jsonOut := hasFlag(args, "--json")
+
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--timeout" {
+			i++
+			var err error
+			timeout, err = time.ParseDuration(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
+				os.Exit(1)
+			}
+		}
+	}
+
+	result, err := whois.Lookup(target, timeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s\n", err)
+		os.Exit(1)
+	}
+
+	if jsonOut {
+		printJSON(result)
+		return
+	}
+
+	fmt.Printf("WHOIS: %s (server: %s)\n\n", result.Target, result.Server)
+	fmt.Println(result.Raw)
+}
+
 // netu trace <host> [--hops n] [--timeout duration] [--json]
 func cmdTrace(args []string) {
 	if len(args) < 1 {
@@ -791,6 +849,7 @@ Commands:
   http     Probe a URL for status, timing, headers, and TLS info
   ping     TCP ping a host with latency stats
   trace    Traceroute to a host (requires sudo)
+  whois    WHOIS lookup for a domain or IP
   serve    Run netu as an HTTP API service
   help     Show help for a command
 
