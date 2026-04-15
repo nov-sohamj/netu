@@ -178,7 +178,3 @@ pscan/
 
 - Go 1.21+
 - No external dependencies
-
-## License
-
-MIT
