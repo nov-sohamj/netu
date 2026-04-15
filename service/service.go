@@ -96,7 +96,8 @@ func handleScan(w http.ResponseWriter, r *http.Request) {
 		workers = parsed
 	}
 
-	results := scanner.ScanPorts(host, startPort, endPort, timeout, workers)
+	opts := scanner.ScanOptions{Timeout: timeout, Workers: workers}
+	results := scanner.ScanPorts(host, startPort, endPort, opts)
 	writeJSON(w, http.StatusOK, apiResponse{Status: "ok", Data: results})
 }
 
@@ -128,7 +129,8 @@ func handleCheck(w http.ResponseWriter, r *http.Request) {
 		timeout = parsed
 	}
 
-	results := scanner.CheckPorts(host, ports, timeout)
+	opts := scanner.ScanOptions{Timeout: timeout, Workers: 100}
+	results := scanner.CheckPorts(host, ports, opts)
 	writeJSON(w, http.StatusOK, apiResponse{Status: "ok", Data: results})
 }
 

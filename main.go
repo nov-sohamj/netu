@@ -28,18 +28,26 @@ var helpTexts = map[string]string{
 	"scan": `netu scan — scan a port or range of ports on a host
 
 Usage:
-  netu scan <host> <port|start-end> [options]
+  netu scan <host> [port|start-end] [options]
+
+If no port is specified, scans the top 100 ports.
 
 Options:
-  --timeout duration   Connection timeout per port (default: 2s)
-  --workers n          Number of concurrent goroutines (default: 100)
-  --json               Output results as JSON
+  --timeout duration    Connection timeout per port (default: 2s)
+  --workers n           Number of concurrent goroutines (default: 100)
+  --retries n           Retry closed ports n times (default: 0)
+  --rate-limit duration Delay between connections (default: 0)
+  --fast                Fast mode: 500ms timeout, 500 workers
+  --top-ports n         Scan top N ports: 100 or 1000 (default: 100)
+  --json                Output results as JSON
 
 Examples:
-  netu scan localhost 80
+  netu scan localhost
   netu scan localhost 1-1024
   netu scan 192.168.1.1 20-100 --timeout 5s --workers 200
-  netu scan localhost 1-1024 --json`,
+  netu scan localhost --top-ports 1000
+  netu scan localhost --fast
+  netu scan localhost --retries 2 --rate-limit 10ms`,
 
 	"check": `netu check — check specific ports on a host
 
@@ -47,12 +55,13 @@ Usage:
   netu check <host> <port> [port...] [options]
 
 Options:
-  --timeout duration   Connection timeout per port (default: 2s)
-  --json               Output results as JSON
+  --timeout duration    Connection timeout per port (default: 2s)
+  --retries n           Retry closed ports n times (default: 0)
+  --json                Output results as JSON
 
 Examples:
   netu check localhost 22 80 443
-  netu check 192.168.1.1 3306 5432 --timeout 5s
+  netu check 192.168.1.1 3306 5432 --timeout 5s --retries 1
   netu check localhost 22 80 --json`,
 
 	"watch": `netu watch — wait for a port to come up
@@ -95,45 +104,46 @@ Examples:
   netu lookup 8.8.8.8
   netu lookup google.com --json`,
 
-	"top": `netu top — scan the top 100 common ports on a host
+	"top": `netu top — scan the top common ports on a host
 
 Usage:
   netu top <host> [options]
 
 Options:
+  --ports n            Number of top ports: 100 or 1000 (default: 100)
   --timeout duration   Connection timeout per port (default: 2s)
   --workers n          Number of concurrent goroutines (default: 100)
+  --fast               Fast mode: 500ms timeout, 500 workers
   --json               Output results as JSON
-
-Scans the top 100 most commonly used ports including SSH (22), HTTP (80),
-HTTPS (443), databases, and other well-known services.
 
 Examples:
   netu top localhost
-  netu top 192.168.1.1 --timeout 5s
-  netu top localhost --json`,
+  netu top localhost --ports 1000
+  netu top localhost --fast
+  netu top 192.168.1.1 --timeout 5s`,
 
-	"http": `netu http — probe a URL for status, timing, headers, and TLS info
+	"http": `netu http — probe a URL for status, timing, headers, TLS, and security
 
 Usage:
   netu http <url> [options]
+
+Auto-adds https:// if no scheme is provided.
 
 Options:
   --timeout duration   Request timeout (default: 10s)
   --json               Output results as JSON
 
 Reports:
-  - HTTP status code
-  - Response time
-  - Content length
-  - Response headers
-  - TLS certificate details and days until expiry (for HTTPS)
+  - HTTP status code and response time
+  - Content length and response headers
+  - TLS certificate details, version, and days until expiry
+  - Security checks: TLS version, cert expiry, HSTS, CSP, X-Frame-Options, etc.
 
 Examples:
-  netu http https://google.com
+  netu http google.com
   netu http http://localhost:8080
-  netu http https://example.com --timeout 5s
-  netu http https://example.com --json`,
+  netu http example.com --timeout 5s
+  netu http example.com --json`,
 
 	"cert": `netu cert — inspect TLS certificate on a host
 
@@ -371,83 +381,143 @@ func hasFlag(args []string, flag string) bool {
 	return false
 }
 
-// netu scan <host> <port|start-end> [--timeout duration] [--workers n] [--json]
+// netu scan <host> [port|start-end] [flags]
 func cmdScan(args []string) {
-	if len(args) < 2 {
+	if len(args) < 1 {
 		printCommandHelp("scan")
 		os.Exit(1)
 	}
 
 	host := args[0]
-	timeout := defaultTimeout
-	workers := defaultWorkers
+	opts := scanner.DefaultOptions()
 	jsonOut := hasFlag(args, "--json")
+	fast := hasFlag(args, "--fast")
+	topPorts := 0
+	useTopPorts := false
 
-	var startPort, endPort int
-	var err error
-	parts := strings.SplitN(args[1], "-", 2)
-	if len(parts) == 1 {
-		startPort, err = strconv.Atoi(parts[0])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid port: %s\n", parts[0])
-			os.Exit(1)
-		}
-		endPort = startPort
-	} else {
-		startPort, err = strconv.Atoi(parts[0])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid start port: %s\n", parts[0])
-			os.Exit(1)
-		}
-		endPort, err = strconv.Atoi(parts[1])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid end port: %s\n", parts[1])
-			os.Exit(1)
-		}
+	if fast {
+		opts = scanner.FastOptions()
 	}
 
-	for i := 2; i < len(args); i++ {
+	// Check if second arg is a port/range or a flag
+	var startPort, endPort int
+	rangeSpecified := false
+	argStart := 1
+	if len(args) > 1 && !strings.HasPrefix(args[1], "--") {
+		var err error
+		parts := strings.SplitN(args[1], "-", 2)
+		if len(parts) == 1 {
+			startPort, err = strconv.Atoi(parts[0])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid port: %s\n", parts[0])
+				os.Exit(1)
+			}
+			endPort = startPort
+		} else {
+			startPort, err = strconv.Atoi(parts[0])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid start port: %s\n", parts[0])
+				os.Exit(1)
+			}
+			endPort, err = strconv.Atoi(parts[1])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid end port: %s\n", parts[1])
+				os.Exit(1)
+			}
+		}
+		rangeSpecified = true
+		argStart = 2
+	}
+
+	for i := argStart; i < len(args); i++ {
+		var err error
 		switch args[i] {
 		case "--timeout":
 			i++
-			timeout, err = time.ParseDuration(args[i])
+			opts.Timeout, err = time.ParseDuration(args[i])
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
 				os.Exit(1)
 			}
 		case "--workers":
 			i++
-			workers, err = strconv.Atoi(args[i])
+			opts.Workers, err = strconv.Atoi(args[i])
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "invalid workers: %s\n", args[i])
 				os.Exit(1)
 			}
+		case "--retries":
+			i++
+			opts.Retries, err = strconv.Atoi(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid retries: %s\n", args[i])
+				os.Exit(1)
+			}
+		case "--rate-limit":
+			i++
+			opts.RateLimit, err = time.ParseDuration(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid rate-limit: %s\n", args[i])
+				os.Exit(1)
+			}
+		case "--top-ports":
+			i++
+			topPorts, err = strconv.Atoi(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid top-ports: %s\n", args[i])
+				os.Exit(1)
+			}
+			useTopPorts = true
 		}
 	}
 
-	results := scanner.ScanPorts(host, startPort, endPort, timeout, workers)
+	// Smart default: if no range and no --top-ports, use top 100
+	if !rangeSpecified && !useTopPorts {
+		useTopPorts = true
+		topPorts = 100
+	}
+
+	var results []scanner.Result
+	if useTopPorts {
+		portList := scanner.Top100
+		if topPorts >= 1000 {
+			portList = scanner.Top1000
+		}
+		results = scanner.CheckPorts(host, portList, opts)
+		if !jsonOut {
+			fmt.Printf("Scanning top %d ports on %s ...\n\n", len(portList), host)
+		}
+	} else {
+		results = scanner.ScanPorts(host, startPort, endPort, opts)
+		if !jsonOut {
+			fmt.Printf("Scanning %s ports %d-%d ...\n\n", host, startPort, endPort)
+		}
+	}
 
 	if jsonOut {
 		printJSON(results)
 		return
 	}
 
-	fmt.Printf("Scanning %s ports %d-%d ...\n\n", host, startPort, endPort)
 	open := 0
 	for _, r := range results {
 		if r.Open {
-			fmt.Printf("  %-6d open\n", r.Port)
+			svc := ""
+			if r.Service != "" {
+				svc = " (" + r.Service + ")"
+			}
+			fmt.Printf("  %-6d open%s\n", r.Port, svc)
 			open++
 		}
 	}
-	total := endPort - startPort + 1
+	total := len(results)
 	if open == 0 {
 		fmt.Println("  No open ports found.")
 	}
 	fmt.Printf("\n%d/%d ports open\n", open, total)
 }
 
-// netu check <host> <port> [port...] [--timeout duration] [--json]
+// netu check <host> <port> [port...] [flags]
 func cmdCheck(args []string) {
 	if len(args) < 2 {
 		printCommandHelp("check")
@@ -455,7 +525,7 @@ func cmdCheck(args []string) {
 	}
 
 	host := args[0]
-	timeout := defaultTimeout
+	opts := scanner.DefaultOptions()
 	jsonOut := hasFlag(args, "--json")
 	var ports []int
 
@@ -464,9 +534,17 @@ func cmdCheck(args []string) {
 		case "--timeout":
 			i++
 			var err error
-			timeout, err = time.ParseDuration(args[i])
+			opts.Timeout, err = time.ParseDuration(args[i])
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
+				os.Exit(1)
+			}
+		case "--retries":
+			i++
+			var err error
+			opts.Retries, err = strconv.Atoi(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid retries: %s\n", args[i])
 				os.Exit(1)
 			}
 		case "--json":
@@ -481,7 +559,7 @@ func cmdCheck(args []string) {
 		}
 	}
 
-	results := scanner.CheckPorts(host, ports, timeout)
+	results := scanner.CheckPorts(host, ports, opts)
 
 	if jsonOut {
 		printJSON(results)
@@ -494,7 +572,11 @@ func cmdCheck(args []string) {
 		if r.Open {
 			state = "open"
 		}
-		fmt.Printf("  %-6d %s\n", r.Port, state)
+		svc := ""
+		if r.Service != "" {
+			svc = " (" + r.Service + ")"
+		}
+		fmt.Printf("  %-6d %s%s\n", r.Port, state, svc)
 	}
 }
 
@@ -622,7 +704,7 @@ func cmdLookup(args []string) {
 	}
 }
 
-// netu top <host> [--timeout duration] [--workers n] [--json]
+// netu top <host> [flags]
 func cmdTop(args []string) {
 	if len(args) < 1 {
 		printCommandHelp("top")
@@ -630,51 +712,70 @@ func cmdTop(args []string) {
 	}
 
 	host := args[0]
-	timeout := defaultTimeout
-	workers := defaultWorkers
+	opts := scanner.DefaultOptions()
 	jsonOut := hasFlag(args, "--json")
+	fast := hasFlag(args, "--fast")
+	topN := 100
+
+	if fast {
+		opts = scanner.FastOptions()
+	}
 
 	for i := 1; i < len(args); i++ {
+		var err error
 		switch args[i] {
 		case "--timeout":
 			i++
-			var err error
-			timeout, err = time.ParseDuration(args[i])
+			opts.Timeout, err = time.ParseDuration(args[i])
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
 				os.Exit(1)
 			}
 		case "--workers":
 			i++
-			var err error
-			workers, err = strconv.Atoi(args[i])
+			opts.Workers, err = strconv.Atoi(args[i])
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "invalid workers: %s\n", args[i])
+				os.Exit(1)
+			}
+		case "--ports":
+			i++
+			topN, err = strconv.Atoi(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid ports: %s\n", args[i])
 				os.Exit(1)
 			}
 		}
 	}
 
-	results := scanner.CheckPorts(host, scanner.Top100, timeout)
+	portList := scanner.Top100
+	if topN >= 1000 {
+		portList = scanner.Top1000
+	}
+
+	results := scanner.CheckPorts(host, portList, opts)
 
 	if jsonOut {
 		printJSON(results)
 		return
 	}
 
-	fmt.Printf("Scanning top %d ports on %s ...\n\n", len(scanner.Top100), host)
+	fmt.Printf("Scanning top %d ports on %s ...\n\n", len(portList), host)
 	open := 0
 	for _, r := range results {
 		if r.Open {
-			fmt.Printf("  %-6d open\n", r.Port)
+			svc := ""
+			if r.Service != "" {
+				svc = " (" + r.Service + ")"
+			}
+			fmt.Printf("  %-6d open%s\n", r.Port, svc)
 			open++
 		}
 	}
 	if open == 0 {
 		fmt.Println("  No open ports found.")
 	}
-	_ = workers // workers used via CheckPorts concurrency
-	fmt.Printf("\n%d/%d ports open\n", open, len(scanner.Top100))
+	fmt.Printf("\n%d/%d ports open\n", open, len(portList))
 }
 
 // netu http <url> [--timeout duration] [--json]
@@ -711,16 +812,33 @@ func cmdHTTP(args []string) {
 		return
 	}
 
-	fmt.Printf("HTTP Probe: %s\n\n", url)
+	fmt.Printf("HTTP Probe: %s\n\n", result.URL)
 	fmt.Printf("  Status:        %s\n", result.StatusText)
 	fmt.Printf("  Response Time: %s\n", result.ResponseTime)
 	fmt.Printf("  Content Size:  %d bytes\n", result.ContentLen)
 
 	if result.TLS != nil {
-		fmt.Printf("\n  TLS Certificate:\n")
+		fmt.Printf("\n  TLS:\n")
+		fmt.Printf("    Version:  %s\n", result.TLS.Version)
 		fmt.Printf("    Subject:  %s\n", result.TLS.Subject)
 		fmt.Printf("    Issuer:   %s\n", result.TLS.Issuer)
 		fmt.Printf("    Expires:  %s (%d days left)\n", result.TLS.NotAfter, result.TLS.DaysLeft)
+	}
+
+	if len(result.SecurityChecks) > 0 {
+		fmt.Printf("\n  Security Checks:\n")
+		for _, sc := range result.SecurityChecks {
+			icon := " "
+			switch sc.Status {
+			case "pass":
+				icon = "+"
+			case "warn":
+				icon = "!"
+			case "fail":
+				icon = "x"
+			}
+			fmt.Printf("    [%s] %-26s %s\n", icon, sc.Name, sc.Detail)
+		}
 	}
 
 	fmt.Printf("\n  Headers:\n")
@@ -836,7 +954,7 @@ func cmdCert(args []string) {
 		return
 	}
 
-	fmt.Printf("TLS Certificate: %s:%d\n", result.Host, result.Port)
+	fmt.Printf("TLS Certificate: %s:%d (%s)\n", result.Host, result.Port, result.TLSVersion)
 	for i, c := range result.Chain {
 		if i == 0 {
 			fmt.Printf("\n  Leaf Certificate:\n")

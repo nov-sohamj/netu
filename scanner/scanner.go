@@ -9,30 +9,63 @@ import (
 )
 
 type Result struct {
-	Port  int
-	Open  bool
+	Port    int    `json:"port"`
+	Open    bool   `json:"open"`
+	Service string `json:"service,omitempty"`
 }
 
 type WatchResult struct {
-	Up       bool
-	Elapsed  time.Duration
+	Up      bool
+	Elapsed time.Duration
+}
+
+type ScanOptions struct {
+	Timeout   time.Duration
+	Workers   int
+	Retries   int
+	RateLimit time.Duration // delay between each connection attempt
+}
+
+func DefaultOptions() ScanOptions {
+	return ScanOptions{
+		Timeout:   2 * time.Second,
+		Workers:   100,
+		Retries:   0,
+		RateLimit: 0,
+	}
+}
+
+func FastOptions() ScanOptions {
+	return ScanOptions{
+		Timeout:   500 * time.Millisecond,
+		Workers:   500,
+		Retries:   0,
+		RateLimit: 0,
+	}
 }
 
 // ScanPorts scans a range of ports on a host concurrently.
-func ScanPorts(host string, startPort, endPort int, timeout time.Duration, workers int) []Result {
-	ports := make(chan int, workers)
+func ScanPorts(host string, startPort, endPort int, opts ScanOptions) []Result {
+	ports := make(chan int, opts.Workers)
 	var results []Result
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	for i := 0; i < workers; i++ {
+	for i := 0; i < opts.Workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for port := range ports {
-				open := isOpen(host, port, timeout)
+				if opts.RateLimit > 0 {
+					time.Sleep(opts.RateLimit)
+				}
+				open := isOpenWithRetry(host, port, opts.Timeout, opts.Retries)
+				r := Result{Port: port, Open: open}
+				if open {
+					r.Service = LookupService(port)
+				}
 				mu.Lock()
-				results = append(results, Result{Port: port, Open: open})
+				results = append(results, r)
 				mu.Unlock()
 			}
 		}()
@@ -51,18 +84,30 @@ func ScanPorts(host string, startPort, endPort int, timeout time.Duration, worke
 }
 
 // CheckPorts checks a specific set of ports on a host.
-func CheckPorts(host string, ports []int, timeout time.Duration) []Result {
+func CheckPorts(host string, ports []int, opts ScanOptions) []Result {
 	var results []Result
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+
+	sem := make(chan struct{}, opts.Workers)
 
 	for _, port := range ports {
 		wg.Add(1)
 		go func(p int) {
 			defer wg.Done()
-			open := isOpen(host, p, timeout)
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if opts.RateLimit > 0 {
+				time.Sleep(opts.RateLimit)
+			}
+			open := isOpenWithRetry(host, p, opts.Timeout, opts.Retries)
+			r := Result{Port: p, Open: open}
+			if open {
+				r.Service = LookupService(p)
+			}
 			mu.Lock()
-			results = append(results, Result{Port: p, Open: open})
+			results = append(results, r)
 			mu.Unlock()
 		}(port)
 	}
@@ -75,7 +120,6 @@ func CheckPorts(host string, ports []int, timeout time.Duration) []Result {
 }
 
 // WatchPort polls a port until it opens or the timeout expires.
-// interval is how often to retry; timeout is the overall deadline.
 func WatchPort(host string, port int, timeout, interval time.Duration) WatchResult {
 	deadline := time.After(timeout)
 	start := time.Now()
@@ -91,6 +135,15 @@ func WatchPort(host string, port int, timeout, interval time.Duration) WatchResu
 		case <-time.After(interval):
 		}
 	}
+}
+
+func isOpenWithRetry(host string, port int, timeout time.Duration, retries int) bool {
+	for attempt := 0; attempt <= retries; attempt++ {
+		if isOpen(host, port, timeout) {
+			return true
+		}
+	}
+	return false
 }
 
 func isOpen(host string, port int, timeout time.Duration) bool {

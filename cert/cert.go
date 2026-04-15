@@ -22,9 +22,10 @@ type CertInfo struct {
 }
 
 type Result struct {
-	Host  string     `json:"host"`
-	Port  int        `json:"port"`
-	Chain []CertInfo `json:"chain"`
+	Host       string     `json:"host"`
+	Port       int        `json:"port"`
+	TLSVersion string     `json:"tls_version"`
+	Chain      []CertInfo `json:"chain"`
 }
 
 // Inspect connects to host:port via TLS and inspects the certificate chain.
@@ -77,10 +78,26 @@ func Inspect(host string, port int, timeout time.Duration) (Result, error) {
 	}
 
 	return Result{
-		Host:  host,
-		Port:  port,
-		Chain: chain,
+		Host:       host,
+		Port:       port,
+		TLSVersion: tlsVersionString(state.Version),
+		Chain:      chain,
 	}, nil
+}
+
+func tlsVersionString(v uint16) string {
+	switch v {
+	case tls.VersionTLS10:
+		return "TLS 1.0"
+	case tls.VersionTLS11:
+		return "TLS 1.1"
+	case tls.VersionTLS12:
+		return "TLS 1.2"
+	case tls.VersionTLS13:
+		return "TLS 1.3"
+	default:
+		return "unknown"
+	}
 }
 
 func decodeKeyUsage(ku x509.KeyUsage, eku []x509.ExtKeyUsage) []string {
