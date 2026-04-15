@@ -1,0 +1,12 @@
+# Binary
+pscan
+
+# Session files
+c-session.txt
+
+# Claude config
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
