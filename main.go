@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"netu/banner"
 	"netu/lookup"
 	"netu/ping"
 	"netu/probe"
@@ -130,6 +131,24 @@ Examples:
   netu http http://localhost:8080
   netu http https://example.com --timeout 5s
   netu http https://example.com --json`,
+
+	"banner": `netu banner — grab service banner from a port
+
+Usage:
+  netu banner <host> <port> [options]
+
+Options:
+  --timeout duration   Connection timeout (default: 5s)
+  --json               Output results as JSON
+
+Connects to a port and reads the service banner. Auto-detects protocols
+like SSH, SMTP, FTP, HTTP, MySQL, Redis, etc. For HTTP ports, sends a
+HEAD request to get the server response.
+
+Examples:
+  netu banner localhost 22
+  netu banner smtp.gmail.com 587
+  netu banner localhost 3306 --json`,
 
 	"whois": `netu whois — domain/IP WHOIS lookup
 
@@ -262,6 +281,8 @@ func main() {
 		cmdHTTP(os.Args[2:])
 	case "ping":
 		cmdPing(os.Args[2:])
+	case "banner":
+		cmdBanner(os.Args[2:])
 	case "trace":
 		cmdTrace(os.Args[2:])
 	case "whois":
@@ -721,6 +742,49 @@ func cmdPing(args []string) {
 	}
 }
 
+// netu banner <host> <port> [--timeout duration] [--json]
+func cmdBanner(args []string) {
+	if len(args) < 2 {
+		printCommandHelp("banner")
+		os.Exit(1)
+	}
+
+	host := args[0]
+	port, err := strconv.Atoi(args[1])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid port: %s\n", args[1])
+		os.Exit(1)
+	}
+
+	timeout := 5 * time.Second
+	jsonOut := hasFlag(args, "--json")
+
+	for i := 2; i < len(args); i++ {
+		if args[i] == "--timeout" {
+			i++
+			timeout, err = time.ParseDuration(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
+				os.Exit(1)
+			}
+		}
+	}
+
+	result, err := banner.Grab(host, port, timeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s\n", err)
+		os.Exit(1)
+	}
+
+	if jsonOut {
+		printJSON(result)
+		return
+	}
+
+	fmt.Printf("Banner: %s:%d [%s]\n\n", result.Host, result.Port, result.Proto)
+	fmt.Println(result.Banner)
+}
+
 // netu whois <domain|ip> [--timeout duration] [--json]
 func cmdWhois(args []string) {
 	if len(args) < 1 {
@@ -847,6 +911,7 @@ Commands:
   top      Scan the top 100 common ports on a host
   lookup   DNS lookup for a domain or IP
   http     Probe a URL for status, timing, headers, and TLS info
+  banner   Grab service banner from a port
   ping     TCP ping a host with latency stats
   trace    Traceroute to a host (requires sudo)
   whois    WHOIS lookup for a domain or IP
