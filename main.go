@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"time"
 
 	"netu/banner"
 	"netu/lookup"
+	"netu/monitor"
 	"netu/ping"
 	"netu/probe"
 	"netu/scanner"
@@ -131,6 +133,27 @@ Examples:
   netu http http://localhost:8080
   netu http https://example.com --timeout 5s
   netu http https://example.com --json`,
+
+	"monitor": `netu monitor — continuously monitor a port
+
+Usage:
+  netu monitor <host> <port> [options]
+
+Options:
+  --interval duration   Check frequency (default: 5s)
+  --timeout duration    Connection timeout per check (default: 2s)
+  --verbose             Log every check, not just state changes
+  --json                Output events as JSON lines
+
+Monitors a port and logs UP/DOWN transitions. Runs until interrupted
+with Ctrl+C. In default mode, only state changes are logged. Use
+--verbose to see every check.
+
+Examples:
+  netu monitor localhost 5432
+  netu monitor 192.168.1.1 80 --interval 10s
+  netu monitor localhost 8080 --verbose
+  netu monitor localhost 3306 --json`,
 
 	"banner": `netu banner — grab service banner from a port
 
@@ -281,6 +304,8 @@ func main() {
 		cmdHTTP(os.Args[2:])
 	case "ping":
 		cmdPing(os.Args[2:])
+	case "monitor":
+		cmdMonitor(os.Args[2:])
 	case "banner":
 		cmdBanner(os.Args[2:])
 	case "trace":
@@ -742,6 +767,75 @@ func cmdPing(args []string) {
 	}
 }
 
+// netu monitor <host> <port> [--interval duration] [--timeout duration] [--verbose] [--json]
+func cmdMonitor(args []string) {
+	if len(args) < 2 {
+		printCommandHelp("monitor")
+		os.Exit(1)
+	}
+
+	host := args[0]
+	port, err := strconv.Atoi(args[1])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid port: %s\n", args[1])
+		os.Exit(1)
+	}
+
+	interval := 5 * time.Second
+	timeout := defaultTimeout
+	verbose := hasFlag(args, "--verbose")
+	jsonOut := hasFlag(args, "--json")
+
+	for i := 2; i < len(args); i++ {
+		switch args[i] {
+		case "--interval":
+			i++
+			interval, err = time.ParseDuration(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid interval: %s\n", args[i])
+				os.Exit(1)
+			}
+		case "--timeout":
+			i++
+			timeout, err = time.ParseDuration(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
+				os.Exit(1)
+			}
+		}
+	}
+
+	if !jsonOut {
+		fmt.Printf("Monitoring %s:%d (every %s, Ctrl+C to stop) ...\n\n", host, port, interval)
+	}
+
+	stop := make(chan struct{})
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	go func() {
+		<-sig
+		close(stop)
+	}()
+
+	onEvent := func(e monitor.Event) {
+		if jsonOut {
+			printJSON(e)
+		} else {
+			if e.RTT != "" {
+				fmt.Printf("  [%s] %s (rtt %s)\n", e.Time, e.Status, e.RTT)
+			} else {
+				fmt.Printf("  [%s] %s\n", e.Time, e.Status)
+			}
+		}
+	}
+
+	monitor.Run(host, port, interval, timeout, verbose, onEvent, stop)
+
+	if !jsonOut {
+		fmt.Println("\nMonitoring stopped.")
+	}
+}
+
 // netu banner <host> <port> [--timeout duration] [--json]
 func cmdBanner(args []string) {
 	if len(args) < 2 {
@@ -911,6 +1005,7 @@ Commands:
   top      Scan the top 100 common ports on a host
   lookup   DNS lookup for a domain or IP
   http     Probe a URL for status, timing, headers, and TLS info
+  monitor  Continuously monitor a port (UP/DOWN)
   banner   Grab service banner from a port
   ping     TCP ping a host with latency stats
   trace    Traceroute to a host (requires sudo)
