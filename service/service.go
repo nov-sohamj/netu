@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"pscan/lookup"
-	"pscan/scanner"
+	"netu/lookup"
+	"netu/scanner"
 )
 
 type scanRequest struct {
@@ -176,7 +176,7 @@ func handleLookup(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, apiResponse{Status: "ok", Data: "pscan service is running"})
+	writeJSON(w, http.StatusOK, apiResponse{Status: "ok", Data: "netu service is running"})
 }
 
 // Start launches the HTTP API server on the given address.
@@ -193,7 +193,7 @@ func Start(addr string) error {
 		return fmt.Errorf("invalid address %q: %w", addr, err)
 	}
 
-	log.Printf("pscan service starting on %s:%s", host, port)
+	log.Printf("netu service starting on %s:%s", host, port)
 	log.Printf("endpoints: /health, /scan, /check, /lookup")
 	return http.ListenAndServe(addr, mux)
 }

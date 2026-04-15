@@ -8,20 +8,20 @@ import (
 	"strings"
 	"time"
 
-	"pscan/lookup"
-	"pscan/probe"
-	"pscan/scanner"
-	"pscan/service"
+	"netu/lookup"
+	"netu/probe"
+	"netu/scanner"
+	"netu/service"
 )
 
 const defaultTimeout = 2 * time.Second
 const defaultWorkers = 100
 
 var helpTexts = map[string]string{
-	"scan": `pscan scan — scan a port or range of ports on a host
+	"scan": `netu scan — scan a port or range of ports on a host
 
 Usage:
-  pscan scan <host> <port|start-end> [options]
+  netu scan <host> <port|start-end> [options]
 
 Options:
   --timeout duration   Connection timeout per port (default: 2s)
@@ -29,29 +29,29 @@ Options:
   --json               Output results as JSON
 
 Examples:
-  pscan scan localhost 80
-  pscan scan localhost 1-1024
-  pscan scan 192.168.1.1 20-100 --timeout 5s --workers 200
-  pscan scan localhost 1-1024 --json`,
+  netu scan localhost 80
+  netu scan localhost 1-1024
+  netu scan 192.168.1.1 20-100 --timeout 5s --workers 200
+  netu scan localhost 1-1024 --json`,
 
-	"check": `pscan check — check specific ports on a host
+	"check": `netu check — check specific ports on a host
 
 Usage:
-  pscan check <host> <port> [port...] [options]
+  netu check <host> <port> [port...] [options]
 
 Options:
   --timeout duration   Connection timeout per port (default: 2s)
   --json               Output results as JSON
 
 Examples:
-  pscan check localhost 22 80 443
-  pscan check 192.168.1.1 3306 5432 --timeout 5s
-  pscan check localhost 22 80 --json`,
+  netu check localhost 22 80 443
+  netu check 192.168.1.1 3306 5432 --timeout 5s
+  netu check localhost 22 80 --json`,
 
-	"watch": `pscan watch — wait for a port to come up
+	"watch": `netu watch — wait for a port to come up
 
 Usage:
-  pscan watch <host> <port> [options]
+  netu watch <host> <port> [options]
 
 Options:
   --timeout duration    How long to wait overall (default: 30s)
@@ -59,13 +59,13 @@ Options:
   --json                Output result as JSON
 
 Examples:
-  pscan watch localhost 5432 --timeout 60s
-  pscan watch localhost 8080 --interval 2s`,
+  netu watch localhost 5432 --timeout 60s
+  netu watch localhost 8080 --interval 2s`,
 
-	"lookup": `pscan lookup — DNS lookup for a domain or IP
+	"lookup": `netu lookup — DNS lookup for a domain or IP
 
 Usage:
-  pscan lookup <domain|ip> [options]
+  netu lookup <domain|ip> [options]
 
 Options:
   --type type   Record type: a, aaaa, mx, ns, txt, cname (default: auto-detect)
@@ -83,15 +83,15 @@ Record types:
   ptr     Reverse lookup (auto for IP input)
 
 Examples:
-  pscan lookup google.com
-  pscan lookup google.com --type mx
-  pscan lookup 8.8.8.8
-  pscan lookup google.com --json`,
+  netu lookup google.com
+  netu lookup google.com --type mx
+  netu lookup 8.8.8.8
+  netu lookup google.com --json`,
 
-	"top": `pscan top — scan the top 100 common ports on a host
+	"top": `netu top — scan the top 100 common ports on a host
 
 Usage:
-  pscan top <host> [options]
+  netu top <host> [options]
 
 Options:
   --timeout duration   Connection timeout per port (default: 2s)
@@ -102,14 +102,14 @@ Scans the top 100 most commonly used ports including SSH (22), HTTP (80),
 HTTPS (443), databases, and other well-known services.
 
 Examples:
-  pscan top localhost
-  pscan top 192.168.1.1 --timeout 5s
-  pscan top localhost --json`,
+  netu top localhost
+  netu top 192.168.1.1 --timeout 5s
+  netu top localhost --json`,
 
-	"http": `pscan http — probe a URL for status, timing, headers, and TLS info
+	"http": `netu http — probe a URL for status, timing, headers, and TLS info
 
 Usage:
-  pscan http <url> [options]
+  netu http <url> [options]
 
 Options:
   --timeout duration   Request timeout (default: 10s)
@@ -123,15 +123,15 @@ Reports:
   - TLS certificate details and days until expiry (for HTTPS)
 
 Examples:
-  pscan http https://google.com
-  pscan http http://localhost:8080
-  pscan http https://example.com --timeout 5s
-  pscan http https://example.com --json`,
+  netu http https://google.com
+  netu http http://localhost:8080
+  netu http https://example.com --timeout 5s
+  netu http https://example.com --json`,
 
-	"serve": `pscan serve — run pscan as an HTTP API service
+	"serve": `netu serve — run netu as an HTTP API service
 
 Usage:
-  pscan serve [options]
+  netu serve [options]
 
 Options:
   --addr address   Address to listen on (default: 0.0.0.0:8080)
@@ -158,8 +158,8 @@ Query parameters for /lookup:
   type       Record type: a, aaaa, mx, ns, txt, cname
 
 Examples:
-  pscan serve
-  pscan serve --addr 127.0.0.1:9090`,
+  netu serve
+  netu serve --addr 127.0.0.1:9090`,
 }
 
 func main() {
@@ -238,7 +238,7 @@ func hasFlag(args []string, flag string) bool {
 	return false
 }
 
-// pscan scan <host> <port|start-end> [--timeout duration] [--workers n] [--json]
+// netu scan <host> <port|start-end> [--timeout duration] [--workers n] [--json]
 func cmdScan(args []string) {
 	if len(args) < 2 {
 		printCommandHelp("scan")
@@ -314,7 +314,7 @@ func cmdScan(args []string) {
 	fmt.Printf("\n%d/%d ports open\n", open, total)
 }
 
-// pscan check <host> <port> [port...] [--timeout duration] [--json]
+// netu check <host> <port> [port...] [--timeout duration] [--json]
 func cmdCheck(args []string) {
 	if len(args) < 2 {
 		printCommandHelp("check")
@@ -365,7 +365,7 @@ func cmdCheck(args []string) {
 	}
 }
 
-// pscan watch <host> <port> [--timeout duration] [--interval duration] [--json]
+// netu watch <host> <port> [--timeout duration] [--interval duration] [--json]
 func cmdWatch(args []string) {
 	if len(args) < 2 {
 		printCommandHelp("watch")
@@ -429,7 +429,7 @@ func cmdWatch(args []string) {
 	}
 }
 
-// pscan lookup <domain|ip> [--type a|aaaa|mx|ns|txt|cname] [--json]
+// netu lookup <domain|ip> [--type a|aaaa|mx|ns|txt|cname] [--json]
 func cmdLookup(args []string) {
 	if len(args) < 1 {
 		printCommandHelp("lookup")
@@ -489,7 +489,7 @@ func cmdLookup(args []string) {
 	}
 }
 
-// pscan top <host> [--timeout duration] [--workers n] [--json]
+// netu top <host> [--timeout duration] [--workers n] [--json]
 func cmdTop(args []string) {
 	if len(args) < 1 {
 		printCommandHelp("top")
@@ -544,7 +544,7 @@ func cmdTop(args []string) {
 	fmt.Printf("\n%d/%d ports open\n", open, len(scanner.Top100))
 }
 
-// pscan http <url> [--timeout duration] [--json]
+// netu http <url> [--timeout duration] [--json]
 func cmdHTTP(args []string) {
 	if len(args) < 1 {
 		printCommandHelp("http")
@@ -596,7 +596,7 @@ func cmdHTTP(args []string) {
 	}
 }
 
-// pscan serve [--addr address]
+// netu serve [--addr address]
 func cmdServe(args []string) {
 	addr := "0.0.0.0:8080"
 
@@ -614,10 +614,10 @@ func cmdServe(args []string) {
 }
 
 func printUsage() {
-	fmt.Println(`pscan — lightweight network toolkit
+	fmt.Println(`netu — lightweight network toolkit
 
 Usage:
-  pscan <command> [options]
+  netu <command> [options]
 
 Commands:
   scan     Scan a port or range of ports on a host
@@ -626,12 +626,12 @@ Commands:
   top      Scan the top 100 common ports on a host
   lookup   DNS lookup for a domain or IP
   http     Probe a URL for status, timing, headers, and TLS info
-  serve    Run pscan as an HTTP API service
+  serve    Run netu as an HTTP API service
   help     Show help for a command
 
 Global flags:
   --help, -h   Show help
   --json       Output results as JSON (supported on all commands)
 
-Run 'pscan help <command>' for details on a specific command.`)
+Run 'netu help <command>' for details on a specific command.`)
 }
