@@ -1,6 +1,6 @@
 # netu
 
-Lightweight network toolkit built with Go. Port scanning, DNS lookup, HTTP probing, and an HTTP API service — zero external dependencies.
+Lightweight network toolkit built with Go. Port scanning, DNS lookup, HTTP probing, TLS inspection, service banner grabbing, WHOIS, traceroute, and more — zero external dependencies.
 
 ## Install
 
@@ -114,6 +114,101 @@ Reports HTTP status, response time, content size, response headers, and TLS cert
 | `--timeout` | `10s` | Request timeout |
 | `--json` | | Output as JSON |
 
+### `netu cert` — TLS certificate inspector
+
+```bash
+netu cert google.com
+netu cert localhost --port 8443
+netu cert example.com --json
+```
+
+Inspects the full TLS certificate chain with subject, issuer, SANs, validity dates, days until expiry, serial number, signature algorithm, key usage, and CA status. Works with self-signed certs.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--port` | `443` | Port to connect to |
+| `--timeout` | `5s` | Connection timeout |
+| `--json` | | Output as JSON |
+
+### `netu monitor` — Continuous port monitor
+
+```bash
+netu monitor localhost 5432
+netu monitor 192.168.1.1 80 --interval 10s
+netu monitor localhost 8080 --verbose
+```
+
+Monitors a port and logs UP/DOWN transitions. Runs until interrupted with Ctrl+C. In default mode, only state changes are logged. Use `--verbose` to see every check.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--interval` | `5s` | Check frequency |
+| `--timeout` | `2s` | Connection timeout per check |
+| `--verbose` | | Log every check, not just state changes |
+| `--json` | | Output events as JSON lines |
+
+### `netu banner` — Service banner grab
+
+```bash
+netu banner localhost 22
+netu banner smtp.gmail.com 587
+netu banner localhost 3306 --json
+```
+
+Connects to a port and reads the service banner. Auto-detects protocols like SSH, SMTP, FTP, HTTP, MySQL, Redis, and MongoDB. For HTTP ports, sends a HEAD request to get the server response.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--timeout` | `5s` | Connection timeout |
+| `--json` | | Output as JSON |
+
+### `netu ping` — TCP ping
+
+```bash
+netu ping localhost 22
+netu ping google.com 443 --count 10
+netu ping localhost 8080 --json
+```
+
+TCP-based ping (no root required). Reports per-ping RTT and summary stats (min/avg/max latency, packet loss).
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--count` | `4` | Number of pings to send |
+| `--timeout` | `2s` | Connection timeout per ping |
+| `--json` | | Output as JSON |
+
+### `netu trace` — Traceroute
+
+```bash
+sudo netu trace google.com
+sudo netu trace 8.8.8.8 --hops 20
+sudo netu trace google.com --json
+```
+
+Sends UDP probes with increasing TTL to trace the network path. Shows per-hop address, reverse DNS, and latency. Requires root/sudo for raw socket access.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--hops` | `30` | Maximum number of hops |
+| `--timeout` | `2s` | Timeout per hop |
+| `--json` | | Output as JSON |
+
+### `netu whois` — WHOIS lookup
+
+```bash
+netu whois google.com
+netu whois 8.8.8.8
+netu whois example.io --json
+```
+
+Queries the appropriate WHOIS server based on the TLD or IP range. Returns registration info, expiry dates, registrar, name servers, etc. Supports 15+ TLD servers out of the box.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--timeout` | `10s` | Query timeout |
+| `--json` | | Output as JSON |
+
 ### `netu serve` — HTTP API service
 
 ```bash
@@ -168,6 +263,18 @@ netu/
 │   └── lookup.go        # DNS lookups
 ├── probe/
 │   └── probe.go         # HTTP probing
+├── cert/
+│   └── cert.go          # TLS certificate inspection
+├── monitor/
+│   └── monitor.go       # Continuous port monitoring
+├── banner/
+│   └── banner.go        # Service banner grabbing
+├── ping/
+│   └── ping.go          # TCP ping
+├── trace/
+│   └── trace.go         # Traceroute
+├── whois/
+│   └── whois.go         # WHOIS lookups
 ├── service/
 │   └── service.go       # HTTP API server
 ├── setup.sh             # Multi-OS installer
@@ -178,3 +285,4 @@ netu/
 
 - Go 1.21+
 - No external dependencies
+- `netu trace` requires root/sudo
