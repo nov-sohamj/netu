@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"pscan/lookup"
+	"pscan/probe"
 	"pscan/scanner"
 	"pscan/service"
 )
@@ -24,11 +26,13 @@ Usage:
 Options:
   --timeout duration   Connection timeout per port (default: 2s)
   --workers n          Number of concurrent goroutines (default: 100)
+  --json               Output results as JSON
 
 Examples:
   pscan scan localhost 80
   pscan scan localhost 1-1024
-  pscan scan 192.168.1.1 20-100 --timeout 5s --workers 200`,
+  pscan scan 192.168.1.1 20-100 --timeout 5s --workers 200
+  pscan scan localhost 1-1024 --json`,
 
 	"check": `pscan check — check specific ports on a host
 
@@ -37,10 +41,12 @@ Usage:
 
 Options:
   --timeout duration   Connection timeout per port (default: 2s)
+  --json               Output results as JSON
 
 Examples:
   pscan check localhost 22 80 443
-  pscan check 192.168.1.1 3306 5432 --timeout 5s`,
+  pscan check 192.168.1.1 3306 5432 --timeout 5s
+  pscan check localhost 22 80 --json`,
 
 	"watch": `pscan watch — wait for a port to come up
 
@@ -50,6 +56,7 @@ Usage:
 Options:
   --timeout duration    How long to wait overall (default: 30s)
   --interval duration   How often to retry (default: 1s)
+  --json                Output result as JSON
 
 Examples:
   pscan watch localhost 5432 --timeout 60s
@@ -62,6 +69,7 @@ Usage:
 
 Options:
   --type type   Record type: a, aaaa, mx, ns, txt, cname (default: auto-detect)
+  --json        Output results as JSON
 
 If the target is an IP address, reverse lookup (PTR) is used automatically.
 
@@ -77,8 +85,48 @@ Record types:
 Examples:
   pscan lookup google.com
   pscan lookup google.com --type mx
-  pscan lookup google.com --type ns
-  pscan lookup 8.8.8.8`,
+  pscan lookup 8.8.8.8
+  pscan lookup google.com --json`,
+
+	"top": `pscan top — scan the top 100 common ports on a host
+
+Usage:
+  pscan top <host> [options]
+
+Options:
+  --timeout duration   Connection timeout per port (default: 2s)
+  --workers n          Number of concurrent goroutines (default: 100)
+  --json               Output results as JSON
+
+Scans the top 100 most commonly used ports including SSH (22), HTTP (80),
+HTTPS (443), databases, and other well-known services.
+
+Examples:
+  pscan top localhost
+  pscan top 192.168.1.1 --timeout 5s
+  pscan top localhost --json`,
+
+	"http": `pscan http — probe a URL for status, timing, headers, and TLS info
+
+Usage:
+  pscan http <url> [options]
+
+Options:
+  --timeout duration   Request timeout (default: 10s)
+  --json               Output results as JSON
+
+Reports:
+  - HTTP status code
+  - Response time
+  - Content length
+  - Response headers
+  - TLS certificate details and days until expiry (for HTTPS)
+
+Examples:
+  pscan http https://google.com
+  pscan http http://localhost:8080
+  pscan http https://example.com --timeout 5s
+  pscan http https://example.com --json`,
 
 	"serve": `pscan serve — run pscan as an HTTP API service
 
@@ -122,13 +170,11 @@ func main() {
 
 	cmd := os.Args[1]
 
-	// handle --help / -h anywhere
 	if cmd == "--help" || cmd == "-h" {
 		printUsage()
 		return
 	}
 
-	// handle: pscan help [command]
 	if cmd == "help" {
 		if len(os.Args) < 3 {
 			printUsage()
@@ -138,7 +184,6 @@ func main() {
 		return
 	}
 
-	// handle: pscan <command> --help
 	for _, arg := range os.Args[2:] {
 		if arg == "--help" || arg == "-h" {
 			printCommandHelp(cmd)
@@ -155,6 +200,10 @@ func main() {
 		cmdWatch(os.Args[2:])
 	case "lookup":
 		cmdLookup(os.Args[2:])
+	case "top":
+		cmdTop(os.Args[2:])
+	case "http":
+		cmdHTTP(os.Args[2:])
 	case "serve":
 		cmdServe(os.Args[2:])
 	default:
@@ -174,7 +223,22 @@ func printCommandHelp(cmd string) {
 	fmt.Println(text)
 }
 
-// pscan scan <host> <port|start-end> [--timeout duration] [--workers n]
+func printJSON(v interface{}) {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	enc.Encode(v)
+}
+
+func hasFlag(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+	}
+	return false
+}
+
+// pscan scan <host> <port|start-end> [--timeout duration] [--workers n] [--json]
 func cmdScan(args []string) {
 	if len(args) < 2 {
 		printCommandHelp("scan")
@@ -184,6 +248,7 @@ func cmdScan(args []string) {
 	host := args[0]
 	timeout := defaultTimeout
 	workers := defaultWorkers
+	jsonOut := hasFlag(args, "--json")
 
 	var startPort, endPort int
 	var err error
@@ -227,9 +292,14 @@ func cmdScan(args []string) {
 		}
 	}
 
-	fmt.Printf("Scanning %s ports %d-%d ...\n\n", host, startPort, endPort)
 	results := scanner.ScanPorts(host, startPort, endPort, timeout, workers)
 
+	if jsonOut {
+		printJSON(results)
+		return
+	}
+
+	fmt.Printf("Scanning %s ports %d-%d ...\n\n", host, startPort, endPort)
 	open := 0
 	for _, r := range results {
 		if r.Open {
@@ -237,7 +307,6 @@ func cmdScan(args []string) {
 			open++
 		}
 	}
-
 	total := endPort - startPort + 1
 	if open == 0 {
 		fmt.Println("  No open ports found.")
@@ -245,7 +314,7 @@ func cmdScan(args []string) {
 	fmt.Printf("\n%d/%d ports open\n", open, total)
 }
 
-// pscan check <host> <port> [port...] [--timeout duration]
+// pscan check <host> <port> [port...] [--timeout duration] [--json]
 func cmdCheck(args []string) {
 	if len(args) < 2 {
 		printCommandHelp("check")
@@ -254,10 +323,12 @@ func cmdCheck(args []string) {
 
 	host := args[0]
 	timeout := defaultTimeout
+	jsonOut := hasFlag(args, "--json")
 	var ports []int
 
 	for i := 1; i < len(args); i++ {
-		if args[i] == "--timeout" {
+		switch args[i] {
+		case "--timeout":
 			i++
 			var err error
 			timeout, err = time.ParseDuration(args[i])
@@ -265,19 +336,26 @@ func cmdCheck(args []string) {
 				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
 				os.Exit(1)
 			}
+		case "--json":
 			continue
+		default:
+			p, err := strconv.Atoi(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid port: %s\n", args[i])
+				os.Exit(1)
+			}
+			ports = append(ports, p)
 		}
-		p, err := strconv.Atoi(args[i])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid port: %s\n", args[i])
-			os.Exit(1)
-		}
-		ports = append(ports, p)
+	}
+
+	results := scanner.CheckPorts(host, ports, timeout)
+
+	if jsonOut {
+		printJSON(results)
+		return
 	}
 
 	fmt.Printf("Checking %d port(s) on %s ...\n\n", len(ports), host)
-	results := scanner.CheckPorts(host, ports, timeout)
-
 	for _, r := range results {
 		state := "closed"
 		if r.Open {
@@ -287,7 +365,7 @@ func cmdCheck(args []string) {
 	}
 }
 
-// pscan watch <host> <port> [--timeout duration] [--interval duration]
+// pscan watch <host> <port> [--timeout duration] [--interval duration] [--json]
 func cmdWatch(args []string) {
 	if len(args) < 2 {
 		printCommandHelp("watch")
@@ -303,6 +381,7 @@ func cmdWatch(args []string) {
 
 	timeout := 30 * time.Second
 	interval := 1 * time.Second
+	jsonOut := hasFlag(args, "--json")
 
 	for i := 2; i < len(args); i++ {
 		switch args[i] {
@@ -323,8 +402,24 @@ func cmdWatch(args []string) {
 		}
 	}
 
-	fmt.Printf("Watching %s:%d (timeout %s, poll every %s) ...\n", host, port, timeout, interval)
+	if !jsonOut {
+		fmt.Printf("Watching %s:%d (timeout %s, poll every %s) ...\n", host, port, timeout, interval)
+	}
+
 	result := scanner.WatchPort(host, port, timeout, interval)
+
+	if jsonOut {
+		printJSON(map[string]interface{}{
+			"host":    host,
+			"port":    port,
+			"up":      result.Up,
+			"elapsed": result.Elapsed.Round(time.Millisecond).String(),
+		})
+		if !result.Up {
+			os.Exit(1)
+		}
+		return
+	}
 
 	if result.Up {
 		fmt.Printf("Port %d is UP (took %s)\n", port, result.Elapsed.Round(time.Millisecond))
@@ -334,7 +429,7 @@ func cmdWatch(args []string) {
 	}
 }
 
-// pscan lookup <domain|ip> [--type a|aaaa|mx|ns|txt|cname]
+// pscan lookup <domain|ip> [--type a|aaaa|mx|ns|txt|cname] [--json]
 func cmdLookup(args []string) {
 	if len(args) < 1 {
 		printCommandHelp("lookup")
@@ -343,6 +438,7 @@ func cmdLookup(args []string) {
 
 	target := args[0]
 	recordType := ""
+	jsonOut := hasFlag(args, "--json")
 
 	for i := 1; i < len(args); i++ {
 		if args[i] == "--type" {
@@ -382,9 +478,121 @@ func cmdLookup(args []string) {
 		os.Exit(1)
 	}
 
+	if jsonOut {
+		printJSON(result)
+		return
+	}
+
 	fmt.Printf("Lookup: %s [%s]\n\n", target, result.Type)
 	for _, r := range result.Records {
 		fmt.Printf("  %s\n", r)
+	}
+}
+
+// pscan top <host> [--timeout duration] [--workers n] [--json]
+func cmdTop(args []string) {
+	if len(args) < 1 {
+		printCommandHelp("top")
+		os.Exit(1)
+	}
+
+	host := args[0]
+	timeout := defaultTimeout
+	workers := defaultWorkers
+	jsonOut := hasFlag(args, "--json")
+
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--timeout":
+			i++
+			var err error
+			timeout, err = time.ParseDuration(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
+				os.Exit(1)
+			}
+		case "--workers":
+			i++
+			var err error
+			workers, err = strconv.Atoi(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid workers: %s\n", args[i])
+				os.Exit(1)
+			}
+		}
+	}
+
+	results := scanner.CheckPorts(host, scanner.Top100, timeout)
+
+	if jsonOut {
+		printJSON(results)
+		return
+	}
+
+	fmt.Printf("Scanning top %d ports on %s ...\n\n", len(scanner.Top100), host)
+	open := 0
+	for _, r := range results {
+		if r.Open {
+			fmt.Printf("  %-6d open\n", r.Port)
+			open++
+		}
+	}
+	if open == 0 {
+		fmt.Println("  No open ports found.")
+	}
+	_ = workers // workers used via CheckPorts concurrency
+	fmt.Printf("\n%d/%d ports open\n", open, len(scanner.Top100))
+}
+
+// pscan http <url> [--timeout duration] [--json]
+func cmdHTTP(args []string) {
+	if len(args) < 1 {
+		printCommandHelp("http")
+		os.Exit(1)
+	}
+
+	url := args[0]
+	timeout := 10 * time.Second
+	jsonOut := hasFlag(args, "--json")
+
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--timeout" {
+			i++
+			var err error
+			timeout, err = time.ParseDuration(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid timeout: %s\n", args[i])
+				os.Exit(1)
+			}
+		}
+	}
+
+	result, err := probe.HTTP(url, timeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s\n", err)
+		os.Exit(1)
+	}
+
+	if jsonOut {
+		printJSON(result)
+		return
+	}
+
+	fmt.Printf("HTTP Probe: %s\n\n", url)
+	fmt.Printf("  Status:        %s\n", result.StatusText)
+	fmt.Printf("  Response Time: %s\n", result.ResponseTime)
+	fmt.Printf("  Content Size:  %d bytes\n", result.ContentLen)
+
+	if result.TLS != nil {
+		fmt.Printf("\n  TLS Certificate:\n")
+		fmt.Printf("    Subject:  %s\n", result.TLS.Subject)
+		fmt.Printf("    Issuer:   %s\n", result.TLS.Issuer)
+		fmt.Printf("    Expires:  %s (%d days left)\n", result.TLS.NotAfter, result.TLS.DaysLeft)
+	}
+
+	fmt.Printf("\n  Headers:\n")
+	for _, h := range result.Headers {
+		fmt.Printf("    %s: %s\n", h.Key, h.Value)
 	}
 }
 
@@ -415,12 +623,15 @@ Commands:
   scan     Scan a port or range of ports on a host
   check    Check specific ports on a host
   watch    Wait for a port to come up
+  top      Scan the top 100 common ports on a host
   lookup   DNS lookup for a domain or IP
+  http     Probe a URL for status, timing, headers, and TLS info
   serve    Run pscan as an HTTP API service
   help     Show help for a command
 
-Flags:
+Global flags:
   --help, -h   Show help
+  --json       Output results as JSON (supported on all commands)
 
 Run 'pscan help <command>' for details on a specific command.`)
 }
