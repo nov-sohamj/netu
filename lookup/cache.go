@@ -57,6 +57,11 @@ func (c *Cache) Size() int {
 	return count
 }
 
+// CacheSize returns the number of non-expired entries in the default cache.
+func CacheSize() int {
+	return defaultCache.Size()
+}
+
 // CachedForward wraps Forward with caching.
 func CachedForward(host string) (Result, error) {
 	key := "fwd:" + host

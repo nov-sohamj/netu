@@ -1,20 +1,50 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"netu/lookup"
 	"netu/scanner"
 )
+
+// --- Stats ---
+
+type serverStats struct {
+	startTime time.Time
+	requests  atomic.Int64
+}
+
+var stats = &serverStats{}
+
+func statsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stats.requests.Add(1)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func handleStats(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, apiResponse{
+		Status: "ok",
+		Data: map[string]interface{}{
+			"uptime":     time.Since(stats.startTime).Round(time.Second).String(),
+			"requests":   stats.requests.Load(),
+			"dns_cached": lookup.CacheSize(),
+		},
+	})
+}
 
 // --- Rate Limiter ---
 
@@ -134,25 +164,6 @@ func validateHost(host string) bool {
 
 func validatePort(p int) bool {
 	return p >= 1 && p <= 65535
-}
-
-type scanRequest struct {
-	Host      string `json:"host"`
-	StartPort int    `json:"start_port"`
-	EndPort   int    `json:"end_port"`
-	Timeout   string `json:"timeout"`
-	Workers   int    `json:"workers"`
-}
-
-type checkRequest struct {
-	Host    string `json:"host"`
-	Ports   []int  `json:"ports"`
-	Timeout string `json:"timeout"`
-}
-
-type lookupRequest struct {
-	Target     string `json:"target"`
-	RecordType string `json:"type"`
 }
 
 type apiResponse struct {
@@ -346,6 +357,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 func Start(addr string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handleHealth)
+	mux.HandleFunc("/stats", handleStats)
 	mux.HandleFunc("/scan", handleScan)
 	mux.HandleFunc("/check", handleCheck)
 	mux.HandleFunc("/lookup", handleLookup)
@@ -358,6 +370,10 @@ func Start(addr string) error {
 
 	// Build middleware chain
 	var handler http.Handler = mux
+
+	// Stats tracking
+	stats.startTime = time.Now()
+	handler = statsMiddleware(handler)
 
 	// Rate limiting: 60 requests per minute per IP
 	rl := newRateLimiter(60, time.Minute)
@@ -372,8 +388,36 @@ func Start(addr string) error {
 	// Request logging
 	handler = loggingMiddleware(handler)
 
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadTimeout:       10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MB
+	}
+
 	log.Printf("netu service starting on %s:%s", host, port)
-	log.Printf("endpoints: /health, /scan, /check, /lookup")
+	log.Printf("endpoints: /health, /stats, /scan, /check, /lookup")
 	log.Printf("rate limit: 60 req/min per IP")
-	return http.ListenAndServe(addr, handler)
+
+	// Graceful shutdown on SIGINT/SIGTERM
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.ListenAndServe()
+	}()
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+
+	select {
+	case err := <-done:
+		return err
+	case <-sig:
+		log.Printf("shutting down gracefully...")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return srv.Shutdown(ctx)
+	}
 }
