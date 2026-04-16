@@ -6,13 +6,135 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"netu/lookup"
 	"netu/scanner"
 )
+
+// --- Rate Limiter ---
+
+type rateLimiter struct {
+	mu       sync.Mutex
+	visitors map[string]*visitor
+	rate     int           // max requests per window
+	window   time.Duration // time window
+}
+
+type visitor struct {
+	count   int
+	resetAt time.Time
+}
+
+func newRateLimiter(rate int, window time.Duration) *rateLimiter {
+	rl := &rateLimiter{
+		visitors: make(map[string]*visitor),
+		rate:     rate,
+		window:   window,
+	}
+	// Clean up stale entries periodically
+	go func() {
+		for {
+			time.Sleep(window)
+			rl.mu.Lock()
+			now := time.Now()
+			for ip, v := range rl.visitors {
+				if now.After(v.resetAt) {
+					delete(rl.visitors, ip)
+				}
+			}
+			rl.mu.Unlock()
+		}
+	}()
+	return rl
+}
+
+func (rl *rateLimiter) allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	v, exists := rl.visitors[ip]
+	if !exists || now.After(v.resetAt) {
+		rl.visitors[ip] = &visitor{count: 1, resetAt: now.Add(rl.window)}
+		return true
+	}
+	v.count++
+	return v.count <= rl.rate
+}
+
+// --- Middleware ---
+
+func rateLimitMiddleware(rl *rateLimiter, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if ip == "" {
+			ip = r.RemoteAddr
+		}
+		if !rl.allow(ip) {
+			writeJSON(w, http.StatusTooManyRequests, apiResponse{
+				Status: "error",
+				Error:  "rate limit exceeded, try again later",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func apiKeyMiddleware(key string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Health endpoint is always open
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		provided := r.Header.Get("X-API-Key")
+		if provided == "" {
+			provided = r.URL.Query().Get("key")
+		}
+		if provided != key {
+			writeJSON(w, http.StatusUnauthorized, apiResponse{
+				Status: "error",
+				Error:  "invalid or missing API key",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		next.ServeHTTP(w, r)
+		log.Printf("%s %s %s %s", r.RemoteAddr, r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
+	})
+}
+
+// --- Validation helpers ---
+
+func validateHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if len(host) > 253 {
+		return false
+	}
+	// Block obvious bad inputs
+	if strings.ContainsAny(host, " \t\n\r;|&$`") {
+		return false
+	}
+	return true
+}
+
+func validatePort(p int) bool {
+	return p >= 1 && p <= 65535
+}
 
 type scanRequest struct {
 	Host      string `json:"host"`
@@ -52,6 +174,10 @@ func handleScan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiResponse{Status: "error", Error: "host and ports are required (e.g. ?host=localhost&ports=1-1024)"})
 		return
 	}
+	if !validateHost(host) {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Status: "error", Error: "invalid host"})
+		return
+	}
 
 	var startPort, endPort int
 	parts := strings.SplitN(portsParam, "-", 2)
@@ -76,12 +202,24 @@ func handleScan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if !validatePort(startPort) || !validatePort(endPort) {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Status: "error", Error: "ports must be between 1 and 65535"})
+		return
+	}
+	if endPort-startPort > 10000 {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Status: "error", Error: "port range too large (max 10000)"})
+		return
+	}
+
 	timeout := 2 * time.Second
 	if t := r.URL.Query().Get("timeout"); t != "" {
 		parsed, err := time.ParseDuration(t)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, apiResponse{Status: "error", Error: "invalid timeout: " + t})
 			return
+		}
+		if parsed > 30*time.Second {
+			parsed = 30 * time.Second
 		}
 		timeout = parsed
 	}
@@ -92,6 +230,9 @@ func handleScan(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, apiResponse{Status: "error", Error: "invalid workers: " + w2})
 			return
+		}
+		if parsed > 500 {
+			parsed = 500
 		}
 		workers = parsed
 	}
@@ -108,6 +249,10 @@ func handleCheck(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiResponse{Status: "error", Error: "host and ports are required (e.g. ?host=localhost&ports=22,80,443)"})
 		return
 	}
+	if !validateHost(host) {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Status: "error", Error: "invalid host"})
+		return
+	}
 
 	var ports []int
 	for _, s := range strings.Split(portsParam, ",") {
@@ -116,7 +261,16 @@ func handleCheck(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, apiResponse{Status: "error", Error: "invalid port: " + s})
 			return
 		}
+		if !validatePort(p) {
+			writeJSON(w, http.StatusBadRequest, apiResponse{Status: "error", Error: "port out of range: " + s})
+			return
+		}
 		ports = append(ports, p)
+	}
+
+	if len(ports) > 100 {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Status: "error", Error: "too many ports (max 100)"})
+		return
 	}
 
 	timeout := 2 * time.Second
@@ -125,6 +279,9 @@ func handleCheck(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, apiResponse{Status: "error", Error: "invalid timeout: " + t})
 			return
+		}
+		if parsed > 30*time.Second {
+			parsed = 30 * time.Second
 		}
 		timeout = parsed
 	}
@@ -140,6 +297,10 @@ func handleLookup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiResponse{Status: "error", Error: "target is required (e.g. ?target=google.com)"})
 		return
 	}
+	if !validateHost(target) && !lookup.IsIP(target) {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Status: "error", Error: "invalid target"})
+		return
+	}
 
 	recordType := strings.ToLower(r.URL.Query().Get("type"))
 
@@ -152,7 +313,7 @@ func handleLookup(w http.ResponseWriter, r *http.Request) {
 
 	switch recordType {
 	case "ptr":
-		result, err = lookup.Reverse(target)
+		result, err = lookup.CachedReverse(target)
 	case "a":
 		result, err = lookup.QueryA(target)
 	case "aaaa":
@@ -166,7 +327,7 @@ func handleLookup(w http.ResponseWriter, r *http.Request) {
 	case "cname":
 		result, err = lookup.QueryCNAME(target)
 	default:
-		result, err = lookup.Forward(target)
+		result, err = lookup.CachedForward(target)
 	}
 
 	if err != nil {
@@ -195,7 +356,24 @@ func Start(addr string) error {
 		return fmt.Errorf("invalid address %q: %w", addr, err)
 	}
 
+	// Build middleware chain
+	var handler http.Handler = mux
+
+	// Rate limiting: 60 requests per minute per IP
+	rl := newRateLimiter(60, time.Minute)
+	handler = rateLimitMiddleware(rl, handler)
+
+	// API key auth (optional — only if NETU_API_KEY is set)
+	if apiKey := os.Getenv("NETU_API_KEY"); apiKey != "" {
+		handler = apiKeyMiddleware(apiKey, handler)
+		log.Printf("API key authentication enabled")
+	}
+
+	// Request logging
+	handler = loggingMiddleware(handler)
+
 	log.Printf("netu service starting on %s:%s", host, port)
 	log.Printf("endpoints: /health, /scan, /check, /lookup")
-	return http.ListenAndServe(addr, mux)
+	log.Printf("rate limit: 60 req/min per IP")
+	return http.ListenAndServe(addr, handler)
 }

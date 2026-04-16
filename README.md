@@ -29,43 +29,55 @@ go install github.com/nov-sohamj/netu@latest
 ### `netu scan` — Scan a port range
 
 ```bash
-netu scan localhost 80
-netu scan localhost 1-1024
-netu scan 192.168.1.1 20-100 --timeout 5s --workers 200
+netu scan localhost                         # Scans top 100 ports (smart default)
+netu scan localhost 80                      # Single port
+netu scan localhost 1-1024                  # Port range
+netu scan localhost --top-ports 1000        # Top 1000 ports
+netu scan localhost --fast                  # Fast mode: 500ms timeout, 500 workers
+netu scan localhost --retries 2 --rate-limit 10ms
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--timeout` | `2s` | Connection timeout per port |
 | `--workers` | `100` | Concurrent goroutines |
+| `--retries` | `0` | Retry closed ports n times |
+| `--rate-limit` | `0` | Delay between connections |
+| `--top-ports` | `100` | Scan top N ports: `100` or `1000` |
+| `--fast` | | Fast mode: 500ms timeout, 500 workers |
 | `--json` | | Output as JSON |
+| `--output` | | Write JSON results to a file |
 
 ### `netu check` — Check specific ports
 
 ```bash
 netu check localhost 22 80 443
-netu check 192.168.1.1 3306 5432 --timeout 5s
+netu check 192.168.1.1 3306 5432 --timeout 5s --retries 1
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--timeout` | `2s` | Connection timeout per port |
+| `--retries` | `0` | Retry closed ports n times |
 | `--json` | | Output as JSON |
+| `--output` | | Write JSON results to a file |
 
-### `netu top` — Scan top 100 common ports
+### `netu top` — Scan top common ports
 
 ```bash
 netu top localhost
-netu top 192.168.1.1 --timeout 5s
+netu top localhost --ports 1000
+netu top localhost --fast
 ```
-
-Scans the top 100 most commonly used ports including SSH (22), HTTP (80), HTTPS (443), databases, and other well-known services.
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `--ports` | `100` | Number of top ports: `100` or `1000` |
 | `--timeout` | `2s` | Connection timeout per port |
 | `--workers` | `100` | Concurrent goroutines |
+| `--fast` | | Fast mode |
 | `--json` | | Output as JSON |
+| `--output` | | Write JSON results to a file |
 
 ### `netu watch` — Wait for a port to come up
 
@@ -91,44 +103,78 @@ netu lookup google.com --type mx      # Mail servers
 netu lookup google.com --type ns      # Name servers
 netu lookup google.com --type txt     # TXT records
 netu lookup google.com --type cname   # Canonical name
-netu lookup google.com --type a       # IPv4 only
-netu lookup google.com --type aaaa    # IPv6 only
 ```
+
+DNS results are cached for 5 minutes to speed up repeated lookups (used internally by `inspect` and the API service).
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--type` | auto | Record type: `a`, `aaaa`, `mx`, `ns`, `txt`, `cname` |
 | `--json` | | Output as JSON |
+| `--output` | | Write JSON results to a file |
 
-### `netu http` — HTTP probe
+### `netu http` — HTTP probe with security checks
 
 ```bash
-netu http https://google.com
+netu http google.com
 netu http http://localhost:8080 --timeout 5s
+netu http example.com --benchmark 20      # Run 20 requests, report latency percentiles
+netu http example.com --json --output result.json
 ```
 
-Reports HTTP status, response time, content size, response headers, and TLS certificate details (expiry, issuer, subject).
+Auto-adds `https://` if no scheme is provided. Reports HTTP status, response time, content size, headers, TLS details, and security checks (HSTS, CSP, X-Frame-Options, TLS version, cert expiry).
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--timeout` | `10s` | Request timeout |
+| `--benchmark` | | Run N requests and report latency stats (min/avg/max/p50/p95/p99) |
 | `--json` | | Output as JSON |
+| `--output` | | Write JSON results to a file |
+
+### `netu inspect` — Full host inspection
+
+```bash
+netu inspect google.com
+netu inspect example.com --json
+```
+
+Runs a comprehensive inspection combining DNS lookup (A/AAAA, NS, MX), top 100 port scan with service detection, HTTP probe with security checks, and TLS certificate chain inspection. The fastest way to get a complete picture of a host.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--json` | | Output as JSON |
+| `--output` | | Write JSON results to a file |
 
 ### `netu cert` — TLS certificate inspector
 
 ```bash
 netu cert google.com
 netu cert localhost --port 8443
-netu cert example.com --json
 ```
 
-Inspects the full TLS certificate chain with subject, issuer, SANs, validity dates, days until expiry, serial number, signature algorithm, key usage, and CA status. Works with self-signed certs.
+Shows the full TLS certificate chain: subject, issuer, SANs, validity, days until expiry, serial, signature algorithm, key usage, CA status.
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--port` | `443` | Port to connect to |
 | `--timeout` | `5s` | Connection timeout |
 | `--json` | | Output as JSON |
+| `--output` | | Write JSON results to a file |
+
+### `netu diff` — Compare JSON results
+
+```bash
+netu scan localhost --json --output before.json
+# ... time passes ...
+netu scan localhost --json --output after.json
+netu diff before.json after.json
+```
+
+Compares two JSON result files and shows what was added, removed, or changed. Useful for tracking infrastructure changes over time.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--json` | | Output diff as JSON |
 
 ### `netu monitor` — Continuous port monitor
 
@@ -138,7 +184,7 @@ netu monitor 192.168.1.1 80 --interval 10s
 netu monitor localhost 8080 --verbose
 ```
 
-Monitors a port and logs UP/DOWN transitions. Runs until interrupted with Ctrl+C. In default mode, only state changes are logged. Use `--verbose` to see every check.
+Monitors a port and logs UP/DOWN transitions with colored output. Runs until Ctrl+C.
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -152,90 +198,115 @@ Monitors a port and logs UP/DOWN transitions. Runs until interrupted with Ctrl+C
 ```bash
 netu banner localhost 22
 netu banner smtp.gmail.com 587
-netu banner localhost 3306 --json
 ```
 
-Connects to a port and reads the service banner. Auto-detects protocols like SSH, SMTP, FTP, HTTP, MySQL, Redis, and MongoDB. For HTTP ports, sends a HEAD request to get the server response.
+Connects to a port and reads the service banner. Auto-detects SSH, SMTP, FTP, HTTP, MySQL, Redis, MongoDB.
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--timeout` | `5s` | Connection timeout |
 | `--json` | | Output as JSON |
+| `--output` | | Write JSON results to a file |
 
 ### `netu ping` — TCP ping
 
 ```bash
 netu ping localhost 22
 netu ping google.com 443 --count 10
-netu ping localhost 8080 --json
 ```
 
-TCP-based ping (no root required). Reports per-ping RTT and summary stats (min/avg/max latency, packet loss).
+TCP-based ping (no root required). Reports per-ping RTT and summary stats (min/avg/max, packet loss).
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--count` | `4` | Number of pings to send |
+| `--count` | `4` | Number of pings |
 | `--timeout` | `2s` | Connection timeout per ping |
 | `--json` | | Output as JSON |
+| `--output` | | Write JSON results to a file |
 
 ### `netu trace` — Traceroute
 
 ```bash
 sudo netu trace google.com
 sudo netu trace 8.8.8.8 --hops 20
-sudo netu trace google.com --json
 ```
 
-Sends UDP probes with increasing TTL to trace the network path. Shows per-hop address, reverse DNS, and latency. Requires root/sudo for raw socket access.
+UDP traceroute with raw ICMP sockets. Shows per-hop address, reverse DNS, and latency. Requires root/sudo.
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--hops` | `30` | Maximum number of hops |
 | `--timeout` | `2s` | Timeout per hop |
 | `--json` | | Output as JSON |
+| `--output` | | Write JSON results to a file |
 
 ### `netu whois` — WHOIS lookup
 
 ```bash
 netu whois google.com
 netu whois 8.8.8.8
-netu whois example.io --json
 ```
 
-Queries the appropriate WHOIS server based on the TLD or IP range. Returns registration info, expiry dates, registrar, name servers, etc. Supports 15+ TLD servers out of the box.
+Queries the appropriate WHOIS server based on TLD or IP range. Supports 15+ TLD servers.
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--timeout` | `10s` | Query timeout |
 | `--json` | | Output as JSON |
+| `--output` | | Write JSON results to a file |
 
 ### `netu serve` — HTTP API service
 
 ```bash
 netu serve
 netu serve --addr 127.0.0.1:9090
+NETU_API_KEY=secret netu serve    # Enable API key auth
 ```
 
-Runs netu as an HTTP API. Endpoints:
+Runs netu as an HTTP API with rate limiting (60 req/min per IP), request logging, and input validation.
 
 | Endpoint | Description | Example |
 |----------|-------------|---------|
 | `GET /health` | Health check | `/health` |
 | `GET /scan` | Scan port range | `/scan?host=localhost&ports=1-1024` |
 | `GET /check` | Check specific ports | `/check?host=localhost&ports=22,80,443` |
-| `GET /lookup` | DNS lookup | `/lookup?target=google.com&type=mx` |
+| `GET /lookup` | DNS lookup (cached) | `/lookup?target=google.com&type=mx` |
+
+**API security:**
+- Rate limit: 60 requests/minute per IP (returns `429` when exceeded)
+- API key auth: Set `NETU_API_KEY` env var to require `X-API-Key` header or `?key=` param
+- Input validation: Host format, port ranges (1-65535), scan range cap (10000), timeout cap (30s)
+- Request logging: All requests logged with IP, method, path, and duration
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--addr` | `0.0.0.0:8080` | Listen address |
 
-## JSON output
+## Global flags
 
-All commands support `--json` for scriptable output:
+| Flag | Description |
+|------|-------------|
+| `--help`, `-h` | Show help |
+| `--json` | Output results as JSON (all commands) |
+| `--output <file>` | Write JSON results to a file (all commands) |
+
+## Color output
+
+All commands use colored terminal output (green for open/pass, red for closed/fail, yellow for warnings). Color is automatically disabled when:
+- `NO_COLOR` environment variable is set
+- Output is piped (not a TTY)
+
+## JSON output
 
 ```bash
 # Pipe to jq
-netu check localhost 22 80 --json | jq '.[] | select(.Open)'
+netu check localhost 22 80 --json | jq '.[] | select(.open)'
+
+# Save results to file
+netu inspect google.com --json --output google.json
+
+# Compare results over time
+netu diff before.json after.json
 
 # Use in scripts
 if netu watch localhost 5432 --timeout 10s --json | jq -e '.up' > /dev/null; then
@@ -255,16 +326,24 @@ netu <command> --help    # Same thing
 
 ```
 netu/
-├── main.go              # CLI entry point
+├── main.go              # CLI entry point (16 commands)
 ├── scanner/
 │   ├── scanner.go       # Port scanning (scan, check, watch)
-│   └── top.go           # Top 100 common ports list
+│   ├── top.go           # Top 100/1000 port lists
+│   └── services.go      # Port-to-service name mapping
 ├── lookup/
-│   └── lookup.go        # DNS lookups
+│   ├── lookup.go        # DNS lookups (A/AAAA/MX/NS/TXT/CNAME/PTR)
+│   └── cache.go         # In-memory DNS cache (5min TTL)
 ├── probe/
-│   └── probe.go         # HTTP probing
+│   └── probe.go         # HTTP probing with security checks
 ├── cert/
-│   └── cert.go          # TLS certificate inspection
+│   └── cert.go          # TLS certificate chain inspection
+├── inspect/
+│   └── inspect.go       # Combined host inspection
+├── diff/
+│   └── diff.go          # JSON result comparison
+├── output/
+│   └── color.go         # Terminal color utilities
 ├── monitor/
 │   └── monitor.go       # Continuous port monitoring
 ├── banner/
@@ -276,7 +355,7 @@ netu/
 ├── whois/
 │   └── whois.go         # WHOIS lookups
 ├── service/
-│   └── service.go       # HTTP API server
+│   └── service.go       # HTTP API server (rate limit, auth, validation)
 ├── setup.sh             # Multi-OS installer
 └── go.mod
 ```
